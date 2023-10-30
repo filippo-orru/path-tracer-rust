@@ -9,3 +9,4 @@ edition = "2021"
 # rand
 rand = "0.8.5"
 chrono = "0.4.19"
+rayon = "1.5.1"

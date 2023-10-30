@@ -2,7 +2,11 @@ use std::{
     f64::consts::PI,
     io::Write,
     ops::{Add, Div, Mul, Sub},
+    sync::atomic,
+    time::Duration,
 };
+
+use rayon::prelude::*;
 
 // uniform double random generator function
 fn rand01() -> f64 {
@@ -268,26 +272,28 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
                         let d = (u * r1.cos() * r2s + v * r1.sin() * r2s + w * (1.0 - r2).sqrt())
                             .normalize();
 
-                        color * radiance(
-                            &Ray {
-                                origin: hit.xmin,
-                                direction: d,
-                            },
-                            new_depth,
-                            scene_objects,
-                        )
+                        color
+                            * radiance(
+                                &Ray {
+                                    origin: hit.xmin,
+                                    direction: d,
+                                },
+                                new_depth,
+                                scene_objects,
+                            )
                     }
                     ReflectType::Specular => {
                         // Ideal SPECULAR reflection
-                        color * radiance(
-                            &Ray {
-                                origin: hit.xmin,
-                                direction: ray.direction
-                                    - hit.nmin * 2.0 * hit.nmin.dot(&ray.direction),
-                            },
-                            new_depth,
-                            scene_objects,
-                        )
+                        color
+                            * radiance(
+                                &Ray {
+                                    origin: hit.xmin,
+                                    direction: ray.direction
+                                        - hit.nmin * 2.0 * hit.nmin.dot(&ray.direction),
+                                },
+                                new_depth,
+                                scene_objects,
+                            )
                     }
                     ReflectType::Refract => {
                         // Ideal dielectric REFRACTION
@@ -324,25 +330,28 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
                                 if rand01() < p {
                                     color * radiance(&refl_ray, new_depth, scene_objects) * rp
                                 } else {
-                                    color * radiance(
-                                        &Ray {
-                                            origin: hit.xmin,
-                                            direction: tdir,
-                                        },
-                                        new_depth,
-                                        scene_objects,
-                                    ) * tp
+                                    color
+                                        * radiance(
+                                            &Ray {
+                                                origin: hit.xmin,
+                                                direction: tdir,
+                                            },
+                                            new_depth,
+                                            scene_objects,
+                                        )
+                                        * tp
                                 }
                             } else {
-                                color * (radiance(&refl_ray, new_depth, scene_objects) * re
-                                    + radiance(
-                                        &Ray {
-                                            origin: hit.xmin,
-                                            direction: tdir,
-                                        },
-                                        new_depth,
-                                        scene_objects,
-                                    ) * tr)
+                                color
+                                    * (radiance(&refl_ray, new_depth, scene_objects) * re
+                                        + radiance(
+                                            &Ray {
+                                                origin: hit.xmin,
+                                                direction: tdir,
+                                            },
+                                            new_depth,
+                                            scene_objects,
+                                        ) * tr)
                             }
                         }
                     }
@@ -405,6 +414,30 @@ fn main() {
             reflect_type: ReflectType::Diffuse,
         },
     }];
+    let scene_objects4 = vec![
+        SceneObject {
+            type_: SceneObjectType::Sphere {
+                position: Vector::from(0.0, 0.0, 0.0),
+                radius: 1.0,
+            },
+            material: Material {
+                color: Vector::from(1.0, 0.0, 0.0),
+                emmission: Vector::from(0.0, 0.0, 0.0),
+                reflect_type: ReflectType::Diffuse,
+            },
+        },
+        SceneObject {
+            type_: SceneObjectType::Sphere {
+                position: Vector::from(0.0, 0.0, 10.0),
+                radius: 1.0,
+            },
+            material: Material {
+                color: Vector::from(0.0, 0.0, 0.0),
+                emmission: Vector::uniform(10.0),
+                reflect_type: ReflectType::Diffuse,
+            },
+        },
+    ];
     let scene_objects = vec![
         SceneObject {
             type_: SceneObjectType::Sphere {
@@ -572,9 +605,6 @@ fn main() {
             let sensor_height: f64 = 0.024;
             // in meters
             let focal_length: f64 = 0.035;
-            let resy = render_config.resolution_y;
-            let resx: usize = resy * 3 / 2;
-            let mut pixels: Vec<Vector> = vec![Vector::zero(); resx * resy];
 
             //-- orthogonal axes spanning the sensor plane
             let su: Vector = sensor_view_direction
@@ -586,65 +616,122 @@ fn main() {
                 .normalized();
             let sv: Vector = su.cross(&sensor_view_direction);
 
-            for y in 0..resy {
-                println!("Progress: {:3.1}%", (y * 100) as f64 / (resy - 1) as f64);
+            let resy = render_config.resolution_y;
+            let resx: usize = resy * 3 / 2;
+            let grid_size = resx * resy;
 
-                for x in 0..resx {
-                    let mut radiance_v: Vector = Vector::zero();
+            let last_progress_print_time = atomic::AtomicU64::new(0);
+            let max_time_between_progress_prints = 1000;
+            let processed_pixel_count = atomic::AtomicUsize::new(0);
 
-                    for s in 0..render_config.samples_per_pixel {
-                        // map to 2x2 subpixel rows and cols
-                        let ysub: f64 = ((s / 2) % 2) as f64;
-                        let xsub: f64 = (s % 2) as f64;
-
-                        // sample sensor subpixel in [-1,1]
-                        let r1: f64 = 2.0 * rand01();
-                        let r2: f64 = 2.0 * rand01();
-                        let xfilter: f64 = if r1 < 1.0 {
-                            // TODO not sure what this is
-                            r1.sqrt() - 1.0
-                        } else {
-                            1.0 - (2.0 - r1).sqrt()
-                        };
-                        let yfilter: f64 = if r1 < 1.0 {
-                            r2.sqrt() - 1.0
-                        } else {
-                            1.0 - (2.0 - r2).sqrt()
-                        };
-
-                        // x and y sample position on sensor plane
-                        let sx: f64 = ((x as f64 + 0.5 * (0.5 + xsub + xfilter)) / resx as f64
-                            - 0.5)
-                            * sensor_width;
-                        let sy: f64 = ((y as f64 + 0.5 * (0.5 + ysub + yfilter)) / resy as f64
-                            - 0.5)
-                            * sensor_height;
-
-                        // 3d sample position on sensor
-                        let sensor_pos = sensor_origin + su * sx + sv * sy;
-                        // lens center (pinhole)
-                        let lens_center = sensor_origin + sensor_view_direction * focal_length;
-                        let ray_direction = (lens_center - sensor_pos).normalized();
-                        // ray through pinhole
-                        let ray = Ray {
-                            origin: lens_center,
-                            direction: ray_direction,
-                        };
-
-                        radiance_v = radiance_v + radiance(&ray, 0, &scene_objects);
-                        // evaluate radiance from this ray and accumulate
+            let print_progress = || {
+                fn fmt(d: std::time::Duration) -> String {
+                    let seconds = d.as_secs() % 60;
+                    let minutes = (d.as_secs() / 60) % 60;
+                    let hours = (d.as_secs() / 60) / 60;
+                    if hours == 0 {
+                        return format!("{}m:{:0>2}s", minutes, seconds);
                     }
-                    radiance_v = radiance_v / render_config.samples_per_pixel as f64; // normalize radiance by number of samples
-
-                    let i: usize = (resy - y - 1) * resx + x; // buffer location of this pixel
-                    let clamped_radiance = Vector::from(
-                        radiance_v.x.clamp(0.0, 1.0),
-                        radiance_v.y.clamp(0.0, 1.0),
-                        radiance_v.z.clamp(0.0, 1.0),
-                    );
-                    pixels[i] = pixels[i] + clamped_radiance;
+                    format!("{}:{:0>2}:{:0>2}", hours, minutes, seconds)
                 }
-            }
+                let processed_percentage = processed_pixel_count.load(atomic::Ordering::Relaxed)
+                    as f64
+                    / (grid_size) as f64;
+                let elapsed = time_start.elapsed();
+                print!(
+                    "Rendering ... {:3.1}% ({} / {})\r",
+                    100.0 * processed_percentage,
+                    fmt(elapsed),
+                    fmt(Duration::from_secs(
+                        (elapsed.as_secs() as f64 * (1.0 / processed_percentage)) as u64
+                    ))
+                );
+                std::io::stdout().flush().unwrap();
+                last_progress_print_time.store(
+                    time_start.elapsed().as_millis() as u64,
+                    atomic::Ordering::Relaxed,
+                );
+            };
+
+            print_progress();
+
+            // Use rayon to parallelize rendering
+            let pixels: Vec<Vector> = (0..grid_size)
+                .into_par_iter()
+                .map_init(
+                    || Vector::zero(),
+                    |_, pixel_index| {
+                        if last_progress_print_time.fetch_add(0, atomic::Ordering::Relaxed)
+                            + max_time_between_progress_prints
+                            < time_start.elapsed().as_millis() as u64
+                        {
+                            print_progress();
+                        }
+
+                        let y = resy - pixel_index / resx;
+                        let x = pixel_index % resx;
+
+                        let mut radiance_v: Vector = Vector::zero();
+
+                        for s in 0..render_config.samples_per_pixel {
+                            // map to 2x2 subpixel rows and cols
+                            let ysub: f64 = ((s / 2) % 2) as f64;
+                            let xsub: f64 = (s % 2) as f64;
+
+                            // sample sensor subpixel in [-1,1]
+                            let r1: f64 = 2.0 * rand01();
+                            let r2: f64 = 2.0 * rand01();
+                            let xfilter: f64 = if r1 < 1.0 {
+                                // TODO not sure what this is
+                                r1.sqrt() - 1.0
+                            } else {
+                                1.0 - (2.0 - r1).sqrt()
+                            };
+                            let yfilter: f64 = if r1 < 1.0 {
+                                r2.sqrt() - 1.0
+                            } else {
+                                1.0 - (2.0 - r2).sqrt()
+                            };
+
+                            // x and y sample position on sensor plane
+                            let sx: f64 = ((x as f64 + 0.5 * (0.5 + xsub + xfilter)) / resx as f64
+                                - 0.5)
+                                * sensor_width;
+                            let sy: f64 = ((y as f64 + 0.5 * (0.5 + ysub + yfilter)) / resy as f64
+                                - 0.5)
+                                * sensor_height;
+
+                            // 3d sample position on sensor
+                            let sensor_pos = sensor_origin + su * sx + sv * sy;
+                            // lens center (pinhole)
+                            let lens_center = sensor_origin + sensor_view_direction * focal_length;
+                            let ray_direction = (lens_center - sensor_pos).normalized();
+                            // ray through pinhole
+                            let ray = Ray {
+                                origin: lens_center,
+                                direction: ray_direction,
+                            };
+
+                            radiance_v = radiance_v + radiance(&ray, 0, &scene_objects);
+                            // evaluate radiance from this ray and accumulate
+                        }
+                        radiance_v = radiance_v / render_config.samples_per_pixel as f64; // normalize radiance by number of samples
+
+                        let i: usize = (resy - y - 1) * resx + x; // buffer location of this pixel
+                        let clamped_radiance = Vector::from(
+                            radiance_v.x.clamp(0.0, 1.0),
+                            radiance_v.y.clamp(0.0, 1.0),
+                            radiance_v.z.clamp(0.0, 1.0),
+                        );
+
+                        processed_pixel_count.fetch_add(1, atomic::Ordering::Relaxed);
+
+                        clamped_radiance
+                    },
+                )
+                .collect();
+            print_progress();
+            println!();
 
             // Create directory if it does not exist
             std::fs::create_dir_all("out").unwrap();
