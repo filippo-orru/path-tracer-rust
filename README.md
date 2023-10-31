@@ -2,7 +2,7 @@
 
 To better understand the cgrpt path tracer, I ported it to Rust.
 
-![red sphere](static/imgs/red-sphere)
+![red sphere](static/imgs/red-sphere.png)
 
 ⚠️ Still has some bugs:
 
