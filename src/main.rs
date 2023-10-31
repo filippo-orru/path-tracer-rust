@@ -1,9 +1,10 @@
 use std::{
     f64::consts::PI,
+    fmt::Display,
     io::Write,
     ops::{Add, Div, Mul, Sub},
     sync::atomic,
-    time::Duration,
+    time::Duration, process::exit,
 };
 
 use rayon::prelude::*;
@@ -187,7 +188,7 @@ impl SceneObjectType {
                 }
                 let t = b - det;
                 let xmin = ray.origin + ray.direction * t;
-                let mut nmin = xmin - position;
+                let nmin = xmin - position;
                 nmin.normalize();
 
                 return IntersectResult::Hit(Hit {
@@ -363,32 +364,49 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
 struct RenderConfig {
     samples_per_pixel: usize,
     resolution_y: usize,
-    num_threads: usize,
-    scene_id: usize,
+    scene_id: SceneId,
+}
+
+#[derive(Clone, Debug)]
+enum SceneId {
+    Int(usize),
+    String(String),
+}
+
+impl Display for SceneId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SceneId::Int(i) => f.write_str(&i.to_string()),
+            SceneId::String(s) => f.write_str(s),
+        }
+    }
 }
 
 impl RenderConfig {
-    fn from(v: Vec<String>) -> Option<Self> {
-        return match v.len() {
-            5 => Some(RenderConfig {
-                samples_per_pixel: v.get(1)?.parse().ok()?,
-                resolution_y: v.get(2)?.parse().ok()?,
-                num_threads: v.get(3)?.parse().ok()?,
-                scene_id: v.get(4)?.parse().ok()?,
-            }),
+    fn from(args: Vec<String>) -> Option<Self> {
+        return match args.len() {
+            4 => {
+                let scene_id_int: Option<usize> = args.get(3)?.parse().ok();
+                let scene_id = match scene_id_int {
+                    Some(int) => SceneId::Int(int),
+                    None => SceneId::String(args.get(3)?.clone()),
+                };
+                Some(RenderConfig {
+                    samples_per_pixel: args.get(1)?.parse().ok()?,
+                    resolution_y: args.get(2)?.parse().ok()?,
+                    scene_id,
+                })
+            }
             1 => Some(RenderConfig::default()),
             _ => None,
         };
     }
-}
 
-impl Default for RenderConfig {
     fn default() -> Self {
         Self {
             samples_per_pixel: 4000,
             resolution_y: 600,
-            num_threads: std::thread::available_parallelism().unwrap().get(),
-            scene_id: 1,
+            scene_id: SceneId::Int(0),
         }
     }
 }
@@ -403,199 +421,231 @@ fn main() {
         z: 2.8,
     };
 
-    let scene_objects2: Vec<SceneObject> = vec![SceneObject {
-        type_: SceneObjectType::Sphere {
-            position: Vector::from(0.0, 0.0, 0.0),
-            radius: 1.0,
-        },
-        material: Material {
-            color: Vector::from(1.0, 1.0, 1.0),
-            emmission: Vector::from(0.98 * 15.0, 15.0, 0.9 * 15.0),
-            reflect_type: ReflectType::Diffuse,
-        },
-    }];
-    let scene_objects4 = vec![
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, 0.0, 0.0),
-                radius: 1.0,
-            },
-            material: Material {
-                color: Vector::from(1.0, 0.0, 0.0),
-                emmission: Vector::from(0.0, 0.0, 0.0),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, 0.0, 10.0),
-                radius: 1.0,
-            },
-            material: Material {
-                color: Vector::from(0.0, 0.0, 0.0),
-                emmission: Vector::uniform(10.0),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-    ];
-    let scene_objects = vec![
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, 0.0, -3.0),
-                radius: 1.0,
-            },
-            material: Material {
-                color: Vector::from(1.0, 0.2, 0.2),
-                emmission: Vector::from(0.0, 0.0, 0.0),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(4.0, 2.0, 0.0),
-                radius: 1.0,
-            },
-            material: Material {
-                color: Vector::from(0.0, 0.0, 0.0),
-                emmission: Vector::from(20.0, 10.0, 10.0),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(-6.0, -2.0, 0.0),
-                radius: 1.0,
-            },
-            material: Material {
-                color: Vector::from(0.0, 0.0, 0.0),
-                emmission: Vector::from(5.0, 9.0, 20.0),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-    ];
-    let scene_objects3: Vec<SceneObject> = vec![
-        // Cornell Box centered in the origin (0, 0, 0)
-        // Left
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(-1e5 - BOX_DIMENSIONS.x, 0.0, 0.0),
-                radius: 1e5,
-            },
-            material: Material {
-                color: Vector::from(0.85, 0.25, 0.25),
-                emmission: Vector::zero(),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-        // Right
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(1e5 + BOX_DIMENSIONS.x, 0.0, 0.0),
-                radius: 1e5,
-            },
-            material: Material {
-                color: Vector::from(0.25, 0.35, 0.85),
-                emmission: Vector::zero(),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-        // Top
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, 1e5 + BOX_DIMENSIONS.y, 0.0),
-                radius: 1e5,
-            },
-            material: Material {
-                color: Vector::from(0.75, 0.75, 0.75),
-                emmission: Vector::zero(),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-        // Bottom
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, -1e5 - BOX_DIMENSIONS.y, 0.0),
-                radius: 1e5,
-            },
-            material: Material {
-                color: Vector::from(0.75, 0.75, 0.75),
-                emmission: Vector::zero(),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-        // Back
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, 0.0, -1e5 - BOX_DIMENSIONS.z),
-                radius: 1e5,
-            },
-            material: Material {
-                color: Vector::from(0.75, 0.75, 0.75),
-                emmission: Vector::zero(),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-        // Front
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, 0.0, 1e5 + 3.0 * BOX_DIMENSIONS.z - 0.5),
-                radius: 1e5,
-            },
-            material: Material {
-                color: Vector::zero(),
-                emmission: Vector::zero(),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-        // Objects
-        // mirroring
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(-1.3, -BOX_DIMENSIONS.y + 0.8, -1.3),
-                radius: 0.8,
-            },
-            material: Material {
-                color: Vector::uniform(0.999),
-                emmission: Vector::zero(),
-                reflect_type: ReflectType::Specular,
-            },
-        },
-        // refracting
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(1.3, -BOX_DIMENSIONS.y + 0.8, -0.2),
-                radius: 0.8,
-            },
-            material: Material {
-                color: Vector::uniform(0.999),
-                emmission: Vector::zero(),
-                reflect_type: ReflectType::Refract,
-            },
-        },
-        // The ceiling area light source (slightly yellowish color)
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, BOX_DIMENSIONS.y + 10.0 - 0.04, 0.0),
-                radius: 10.0,
-            },
-            material: Material {
-                color: Vector::zero(),
-                // emmission: Vector::from(0.98 * 2.0, 2.0, 0.9 * 2.0),
-                emmission: Vector::from(0.98 * 15.0, 15.0, 0.9 * 15.0),
-                reflect_type: ReflectType::Diffuse,
-            },
-        },
-    ];
+    // scene_id to scene_objects
+    let scenes: Vec<(&str, Vec<SceneObject>)> = [
+        (
+            "single-sphere",
+            vec![SceneObject {
+                type_: SceneObjectType::Sphere {
+                    position: Vector::from(0.0, 0.0, 0.0),
+                    radius: 1.0,
+                },
+                material: Material {
+                    color: Vector::from(1.0, 1.0, 1.0),
+                    emmission: Vector::from(0.98 * 15.0, 15.0, 0.9 * 15.0),
+                    reflect_type: ReflectType::Diffuse,
+                },
+            }],
+        ),
+        (
+            "two-spheres",
+            vec![
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(0.0, 0.0, 0.0),
+                        radius: 1.0,
+                    },
+                    material: Material {
+                        color: Vector::from(1.0, 0.0, 0.0),
+                        emmission: Vector::from(0.0, 0.0, 0.0),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(0.0, 0.0, 10.0),
+                        radius: 1.0,
+                    },
+                    material: Material {
+                        color: Vector::from(0.0, 0.0, 0.0),
+                        emmission: Vector::uniform(10.0),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+            ],
+        ),
+        (
+            "three-spheres",
+            vec![
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(0.0, 0.0, -3.0),
+                        radius: 1.0,
+                    },
+                    material: Material {
+                        color: Vector::from(1.0, 0.2, 0.2),
+                        emmission: Vector::from(0.0, 0.0, 0.0),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(4.0, 2.0, 0.0),
+                        radius: 1.0,
+                    },
+                    material: Material {
+                        color: Vector::from(0.0, 0.0, 0.0),
+                        emmission: Vector::from(20.0, 10.0, 10.0),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(-6.0, -2.0, 0.0),
+                        radius: 1.0,
+                    },
+                    material: Material {
+                        color: Vector::from(0.0, 0.0, 0.0),
+                        emmission: Vector::from(5.0, 9.0, 20.0),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+            ],
+        ),
+        (
+            "cornell",
+            vec![
+                // Cornell Box centered in the origin (0, 0, 0)
+                // Left
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(-1e5 - BOX_DIMENSIONS.x, 0.0, 0.0),
+                        radius: 1e5,
+                    },
+                    material: Material {
+                        color: Vector::from(0.85, 0.25, 0.25),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+                // Right
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(1e5 + BOX_DIMENSIONS.x, 0.0, 0.0),
+                        radius: 1e5,
+                    },
+                    material: Material {
+                        color: Vector::from(0.25, 0.35, 0.85),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+                // Top
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(0.0, 1e5 + BOX_DIMENSIONS.y, 0.0),
+                        radius: 1e5,
+                    },
+                    material: Material {
+                        color: Vector::from(0.75, 0.75, 0.75),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+                // Bottom
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(0.0, -1e5 - BOX_DIMENSIONS.y, 0.0),
+                        radius: 1e5,
+                    },
+                    material: Material {
+                        color: Vector::from(0.75, 0.75, 0.75),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+                // Back
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(0.0, 0.0, -1e5 - BOX_DIMENSIONS.z),
+                        radius: 1e5,
+                    },
+                    material: Material {
+                        color: Vector::from(0.75, 0.75, 0.75),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+                // Front
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(0.0, 0.0, 1e5 + 3.0 * BOX_DIMENSIONS.z - 0.5),
+                        radius: 1e5,
+                    },
+                    material: Material {
+                        color: Vector::zero(),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+                // Objects
+                // mirroring
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(-1.3, -BOX_DIMENSIONS.y + 0.8, -1.3),
+                        radius: 0.8,
+                    },
+                    material: Material {
+                        color: Vector::uniform(0.999),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Specular,
+                    },
+                },
+                // refracting
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(1.3, -BOX_DIMENSIONS.y + 0.8, -0.2),
+                        radius: 0.8,
+                    },
+                    material: Material {
+                        color: Vector::uniform(0.999),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Refract,
+                    },
+                },
+                // The ceiling area light source (slightly yellowish color)
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(0.0, BOX_DIMENSIONS.y + 10.0 - 0.04, 0.0),
+                        radius: 10.0,
+                    },
+                    material: Material {
+                        color: Vector::zero(),
+                        // emmission: Vector::from(0.98 * 2.0, 2.0, 0.9 * 2.0),
+                        emmission: Vector::from(0.98 * 15.0, 15.0, 0.9 * 15.0),
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
+            ],
+        ),
+    ]
+    .into();
+
+    let print_usage = || {
+        println!(
+            "Run with:\ncargo run <samplesPerPixel = 4000> <y-resolution = 600> <scene = '{}'>\n\nScenes: {}",
+            scenes.iter().next().unwrap().0,
+            scenes.iter().enumerate().map(|(i, scene)| format!("{}: {}", i, scene.0)).collect::<Vec<_>>().join(", ")
+        );
+    };
 
     let maybe_render_config = RenderConfig::from(std::env::args().collect());
     match maybe_render_config {
         None => {
-            println!(
-                "Run with `cargo run <samplesPerPixel = 4000> <y-resolution = 600> <num-threads = {}> <scene = 1>", 
-                std::thread::available_parallelism().unwrap().get()
-            );
+            print_usage();
+            exit(1);
         }
         Some(render_config) => {
+            let scene_objects: &Vec<SceneObject> = &match render_config.scene_id.clone() {
+                SceneId::Int(i) => scenes.get(i),
+                SceneId::String(s) => scenes.iter().find(|scene| scene.0 == s.as_str()),
+            }
+            .unwrap_or_else(|| {
+                print_usage();
+                exit(1);
+            })
+            .1;
+
             //-- setup sensor
             let sensor_origin: Vector =
                 Vector::from(0.0, 0.26 * BOX_DIMENSIONS.y, 3.0 * BOX_DIMENSIONS.z - 1.0);
@@ -717,7 +767,6 @@ fn main() {
                         }
                         radiance_v = radiance_v / render_config.samples_per_pixel as f64; // normalize radiance by number of samples
 
-                        let i: usize = (resy - y - 1) * resx + x; // buffer location of this pixel
                         let clamped_radiance = Vector::from(
                             radiance_v.x.clamp(0.0, 1.0),
                             radiance_v.y.clamp(0.0, 1.0),
@@ -738,7 +787,7 @@ fn main() {
 
             // Write .ppm file
             let mut file = std::fs::File::create(format!(
-                "out/{}-scene{}-spp{}-res{}-.ppm",
+                "out/{}-scene-{}-spp{}-res{}-.ppm",
                 chrono::Local::now().format("%Y-%m-%d_%H:%M:%S").to_string(),
                 render_config.scene_id,
                 render_config.samples_per_pixel,
@@ -748,10 +797,9 @@ fn main() {
             file.write_all(b"P3\n").unwrap();
             file.write_all(
                 format!(
-                    "# samplesPerPixel: {}, resolution_y: {}, num_threads: {}, scene_id: {}\n",
+                    "# samplesPerPixel: {}, resolution_y: {}, scene_id: {}\n",
                     render_config.samples_per_pixel,
                     render_config.resolution_y,
-                    render_config.num_threads,
                     render_config.scene_id
                 )
                 .as_bytes(),
