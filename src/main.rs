@@ -1,13 +1,15 @@
 use std::{
-    f64::consts::PI,
     fmt::Display,
     io::Write,
     ops::{Add, Div, Mul, Sub},
+    process::exit,
     sync::atomic,
-    time::Duration, process::exit,
+    time::Duration,
 };
 
 use rayon::prelude::*;
+
+const PI: f64 = 3.141592653589793;
 
 // uniform double random generator function
 fn rand01() -> f64 {
@@ -580,29 +582,29 @@ fn main() {
                 },
                 // Objects
                 // mirroring
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(-1.3, -BOX_DIMENSIONS.y + 0.8, -1.3),
-                        radius: 0.8,
-                    },
-                    material: Material {
-                        color: Vector::uniform(0.999),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Specular,
-                    },
-                },
-                // refracting
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(1.3, -BOX_DIMENSIONS.y + 0.8, -0.2),
-                        radius: 0.8,
-                    },
-                    material: Material {
-                        color: Vector::uniform(0.999),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Refract,
-                    },
-                },
+                // SceneObject {
+                //     type_: SceneObjectType::Sphere {
+                //         position: Vector::from(-1.3, -BOX_DIMENSIONS.y + 0.8, -1.3),
+                //         radius: 0.8,
+                //     },
+                //     material: Material {
+                //         color: Vector::uniform(0.999),
+                //         emmission: Vector::zero(),
+                //         reflect_type: ReflectType::Specular,
+                //     },
+                // },
+                // // refracting
+                // SceneObject {
+                //     type_: SceneObjectType::Sphere {
+                //         position: Vector::from(1.3, -BOX_DIMENSIONS.y + 0.8, -0.2),
+                //         radius: 0.8,
+                //     },
+                //     material: Material {
+                //         color: Vector::uniform(0.999),
+                //         emmission: Vector::zero(),
+                //         reflect_type: ReflectType::Refract,
+                //     },
+                // },
                 // The ceiling area light source (slightly yellowish color)
                 SceneObject {
                     type_: SceneObjectType::Sphere {
@@ -612,7 +614,7 @@ fn main() {
                     material: Material {
                         color: Vector::zero(),
                         // emmission: Vector::from(0.98 * 2.0, 2.0, 0.9 * 2.0),
-                        emmission: Vector::from(0.98 * 15.0, 15.0, 0.9 * 15.0),
+                        emmission: Vector::from(0.98, 1.0, 0.9) * 5.0,
                         reflect_type: ReflectType::Diffuse,
                     },
                 },
