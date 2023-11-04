@@ -19,7 +19,9 @@
                     "kind": "bin"
                 }
             },
-            "args": [],
+            "args": [
+                "500","300", "cornell"
+            ],
             "cwd": "${workspaceFolder}"
         },
         {

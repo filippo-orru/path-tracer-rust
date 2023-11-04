@@ -11,9 +11,30 @@ use rayon::prelude::*;
 
 const PI: f64 = 3.141592653589793;
 
+/// If true, render with a fixed sequence of random numbers.
+const MOCK_RANDOM: bool = false;
+const MOCK_RANDOMS: [f64; 9] = [
+    0.75902418061906407,
+    0.023879213030728041,
+    0.21016190197770457,
+    0.78814922184253244,
+    0.56819568237964491,
+    0.7689823904006352,
+    0.16910304067812287,
+    0.54519597695203492,
+    0.63614169009490062,
+];
+const MOCK_RANDOMS_LEN: usize = MOCK_RANDOMS.len();
+static MOCK_RANDOMS_INDEX: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
+
 // uniform double random generator function
 fn rand01() -> f64 {
-    return rand::random::<f64>();
+    if MOCK_RANDOM {
+        let i = MOCK_RANDOMS_INDEX.fetch_add(1, atomic::Ordering::Relaxed) % MOCK_RANDOMS_LEN;
+        return MOCK_RANDOMS[i];
+    } else {
+        return rand::random::<f64>();
+    }
 }
 
 fn to_int_with_gamma_correction(x: f64) -> usize {
@@ -91,24 +112,20 @@ impl Vector {
         }
     }
 
-    fn from(a: f64, b: f64, c: f64) -> Self {
+    const fn from(a: f64, b: f64, c: f64) -> Self {
         Vector { x: a, y: b, z: c }
     }
 
-    fn uniform(u: f64) -> Self {
+    const fn uniform(u: f64) -> Self {
         Vector { x: u, y: u, z: u }
     }
 
     fn normalize(mut self) -> Self {
-        let f = self.magnitude();
-        self.x /= f;
-        self.y /= f;
-        self.z /= f;
+        let m = self.magnitude();
+        self.x /= m;
+        self.y /= m;
+        self.z /= m;
         return self;
-    }
-
-    fn normalized(&self) -> Self {
-        return self.clone() / self.magnitude();
     }
 
     fn dot(&self, other: &Vector) -> f64 {
@@ -179,24 +196,27 @@ impl SceneObjectType {
                 let op: Vector = position - ray.origin;
                 let eps: f64 = 1e-4;
                 let b = op.dot(&ray.direction);
-                let mut det = b * b - op.dot(&op) + radius.powi(2);
+                let mut det = b.powi(2) - op.dot(&op) + radius.powi(2);
                 if det < 0.0 {
                     return IntersectResult::NoHit;
                 } else {
                     det = det.sqrt();
                 }
-                if b - det < eps && b + det < eps {
+                let t = if b - det >= eps {
+                    b - det
+                } else if b + det >= eps {
+                    b + det
+                } else {
                     return IntersectResult::NoHit;
-                }
-                let t = b - det;
+                };
+
                 let xmin = ray.origin + ray.direction * t;
-                let nmin = xmin - position;
-                nmin.normalize();
+                let nmin = (xmin - position).normalize();
 
                 return IntersectResult::Hit(Hit {
                     distance: t,
-                    xmin: xmin,
-                    nmin: nmin,
+                    xmin,
+                    nmin,
                 });
             }
         }
@@ -217,7 +237,7 @@ fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObject>) -> SceneIntersec
                     hit: new_hit,
                 };
             }
-            (IntersectResult::Hit(new_hit), SceneIntersectResult::Hit { object_id: _, hit }) => {
+            (IntersectResult::Hit(new_hit), SceneIntersectResult::Hit {  hit , ..}) => {
                 if new_hit.distance < hit.distance {
                     min_intersect = SceneIntersectResult::Hit {
                         object_id: i,
@@ -318,7 +338,7 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
                             let tdir = (ray.direction * nnt
                                 - hit.nmin
                                     * (if into { 1.0 } else { -1.0 } * (ddn * nnt + cos2t.sqrt())))
-                            .normalized();
+                            .normalize();
                             let a = nt - nc;
                             let b = nt + nc;
                             let r0 = a * a / (b * b);
@@ -582,29 +602,29 @@ fn main() {
                 },
                 // Objects
                 // mirroring
-                // SceneObject {
-                //     type_: SceneObjectType::Sphere {
-                //         position: Vector::from(-1.3, -BOX_DIMENSIONS.y + 0.8, -1.3),
-                //         radius: 0.8,
-                //     },
-                //     material: Material {
-                //         color: Vector::uniform(0.999),
-                //         emmission: Vector::zero(),
-                //         reflect_type: ReflectType::Specular,
-                //     },
-                // },
-                // // refracting
-                // SceneObject {
-                //     type_: SceneObjectType::Sphere {
-                //         position: Vector::from(1.3, -BOX_DIMENSIONS.y + 0.8, -0.2),
-                //         radius: 0.8,
-                //     },
-                //     material: Material {
-                //         color: Vector::uniform(0.999),
-                //         emmission: Vector::zero(),
-                //         reflect_type: ReflectType::Refract,
-                //     },
-                // },
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(-1.3, -BOX_DIMENSIONS.y + 0.8, -1.3),
+                        radius: 0.8,
+                    },
+                    material: Material {
+                        color: Vector::uniform(0.999),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Specular,
+                    },
+                },
+                // refracting
+                SceneObject {
+                    type_: SceneObjectType::Sphere {
+                        position: Vector::from(1.3, -BOX_DIMENSIONS.y + 0.8, -0.2),
+                        radius: 0.8,
+                    },
+                    material: Material {
+                        color: Vector::uniform(0.999),
+                        emmission: Vector::zero(),
+                        reflect_type: ReflectType::Refract,
+                    },
+                },
                 // The ceiling area light source (slightly yellowish color)
                 SceneObject {
                     type_: SceneObjectType::Sphere {
@@ -614,7 +634,7 @@ fn main() {
                     material: Material {
                         color: Vector::zero(),
                         // emmission: Vector::from(0.98 * 2.0, 2.0, 0.9 * 2.0),
-                        emmission: Vector::from(0.98, 1.0, 0.9) * 5.0,
+                        emmission: Vector::from(0.98, 1.0, 0.9) * 15.0,
                         reflect_type: ReflectType::Diffuse,
                     },
                 },
@@ -652,7 +672,7 @@ fn main() {
             let sensor_origin: Vector =
                 Vector::from(0.0, 0.26 * BOX_DIMENSIONS.y, 3.0 * BOX_DIMENSIONS.z - 1.0);
             // normal to sensor plane
-            let sensor_view_direction: Vector = Vector::from(0.0, -0.06, -1.0).normalized();
+            let sensor_view_direction: Vector = Vector::from(0.0, -0.06, -1.0).normalize();
             let sensor_width: f64 = 0.036;
             let sensor_height: f64 = 0.024;
             // in meters
@@ -665,12 +685,22 @@ fn main() {
                 } else {
                     Vector::from(0.0, 0.0, 1.0)
                 })
-                .normalized();
+                .normalize();
             let sv: Vector = su.cross(&sensor_view_direction);
 
             let resy = render_config.resolution_y;
             let resx: usize = resy * 3 / 2;
             let grid_size = resx * resy;
+
+            println!(
+                "Scene {} ({} objects), {} samples per pixel, {}x{} resolution{}",
+                render_config.scene_id,
+                scene_objects.len(),
+                render_config.samples_per_pixel,
+                render_config.resolution_y * 3 / 2,
+                render_config.resolution_y,
+                if MOCK_RANDOM { " (mock random)" } else { "" }
+            );
 
             let last_progress_print_time = atomic::AtomicU64::new(0);
             let max_time_between_progress_prints = 1000;
@@ -691,7 +721,7 @@ fn main() {
                     / (grid_size) as f64;
                 let elapsed = time_start.elapsed();
                 print!(
-                    "Rendering ... {:3.1}% ({} / {})\r",
+                    "\rRendering ... {:3.1}% ({} / {})",
                     100.0 * processed_percentage,
                     fmt(elapsed),
                     fmt(Duration::from_secs(
@@ -707,80 +737,76 @@ fn main() {
 
             print_progress();
 
-            // Use rayon to parallelize rendering
-            let pixels: Vec<Vector> = (0..grid_size)
-                .into_par_iter()
-                .map_init(
-                    || Vector::zero(),
-                    |_, pixel_index| {
-                        if last_progress_print_time.fetch_add(0, atomic::Ordering::Relaxed)
-                            + max_time_between_progress_prints
-                            < time_start.elapsed().as_millis() as u64
-                        {
-                            print_progress();
-                        }
+            let fun = |pixel_index| {
+                if last_progress_print_time.load(atomic::Ordering::Relaxed)
+                    + max_time_between_progress_prints
+                    < time_start.elapsed().as_millis() as u64
+                {
+                    print_progress();
+                }
 
-                        let y = resy - pixel_index / resx;
-                        let x = pixel_index % resx;
+                let y = resy - 1 - pixel_index / resx;
+                let x = pixel_index % resx;
 
-                        let mut radiance_v: Vector = Vector::zero();
+                let mut radiance_v: Vector = Vector::zero();
 
-                        for s in 0..render_config.samples_per_pixel {
-                            // map to 2x2 subpixel rows and cols
-                            let ysub: f64 = ((s / 2) % 2) as f64;
-                            let xsub: f64 = (s % 2) as f64;
+                for s in 0..render_config.samples_per_pixel {
+                    // map to 2x2 subpixel rows and cols
+                    let ysub: f64 = ((s / 2) % 2) as f64;
+                    let xsub: f64 = (s % 2) as f64;
 
-                            // sample sensor subpixel in [-1,1]
-                            let r1: f64 = 2.0 * rand01();
-                            let r2: f64 = 2.0 * rand01();
-                            let xfilter: f64 = if r1 < 1.0 {
-                                // TODO not sure what this is
-                                r1.sqrt() - 1.0
-                            } else {
-                                1.0 - (2.0 - r1).sqrt()
-                            };
-                            let yfilter: f64 = if r1 < 1.0 {
-                                r2.sqrt() - 1.0
-                            } else {
-                                1.0 - (2.0 - r2).sqrt()
-                            };
+                    // sample sensor subpixel in [-1,1]
+                    let r1: f64 = 2.0 * rand01();
+                    let r2: f64 = 2.0 * rand01();
+                    let xfilter: f64 = if r1 < 1.0 {
+                        // TODO not sure what this is
+                        r1.sqrt() - 1.0
+                    } else {
+                        1.0 - (2.0 - r1).sqrt()
+                    };
+                    let yfilter: f64 = if r2 < 1.0 {
+                        r2.sqrt() - 1.0
+                    } else {
+                        1.0 - (2.0 - r2).sqrt()
+                    };
 
-                            // x and y sample position on sensor plane
-                            let sx: f64 = ((x as f64 + 0.5 * (0.5 + xsub + xfilter)) / resx as f64
-                                - 0.5)
-                                * sensor_width;
-                            let sy: f64 = ((y as f64 + 0.5 * (0.5 + ysub + yfilter)) / resy as f64
-                                - 0.5)
-                                * sensor_height;
+                    // x and y sample position on sensor plane
+                    let sx: f64 = ((x as f64 + 0.5 * (0.5 + xsub + xfilter)) / resx as f64 - 0.5)
+                        * sensor_width;
+                    let sy: f64 = ((y as f64 + 0.5 * (0.5 + ysub + yfilter)) / resy as f64 - 0.5)
+                        * sensor_height;
 
-                            // 3d sample position on sensor
-                            let sensor_pos = sensor_origin + su * sx + sv * sy;
-                            // lens center (pinhole)
-                            let lens_center = sensor_origin + sensor_view_direction * focal_length;
-                            let ray_direction = (lens_center - sensor_pos).normalized();
-                            // ray through pinhole
-                            let ray = Ray {
-                                origin: lens_center,
-                                direction: ray_direction,
-                            };
+                    // 3d sample position on sensor
+                    let sensor_pos = sensor_origin + su * sx + sv * sy;
+                    // lens center (pinhole)
+                    let lens_center = sensor_origin + sensor_view_direction * focal_length;
+                    let ray_direction = (lens_center - sensor_pos).normalize();
+                    // ray through pinhole
+                    let ray = Ray {
+                        origin: lens_center,
+                        direction: ray_direction,
+                    };
 
-                            radiance_v = radiance_v + radiance(&ray, 0, &scene_objects);
-                            // evaluate radiance from this ray and accumulate
-                        }
-                        radiance_v = radiance_v / render_config.samples_per_pixel as f64; // normalize radiance by number of samples
+                    // evaluate radiance from this ray and accumulate
+                    radiance_v = radiance_v + radiance(&ray, 0, &scene_objects);
+                }
+                // normalize radiance by number of samples
+                radiance_v = radiance_v / render_config.samples_per_pixel as f64; 
+                processed_pixel_count.fetch_add(1, atomic::Ordering::Relaxed);
 
-                        let clamped_radiance = Vector::from(
-                            radiance_v.x.clamp(0.0, 1.0),
-                            radiance_v.y.clamp(0.0, 1.0),
-                            radiance_v.z.clamp(0.0, 1.0),
-                        );
-
-                        processed_pixel_count.fetch_add(1, atomic::Ordering::Relaxed);
-
-                        clamped_radiance
-                    },
+                Vector::from(
+                    radiance_v.x.clamp(0.0, 1.0),
+                    radiance_v.y.clamp(0.0, 1.0),
+                    radiance_v.z.clamp(0.0, 1.0),
                 )
-                .collect();
+            };
+            let pixels: Vec<Vector> = if MOCK_RANDOM {
+                (0..grid_size).into_iter().map(fun).collect()
+            } else {
+                // Use rayon to parallelize rendering
+                (0..grid_size).into_par_iter().map(fun).collect()
+            };
+
             print_progress();
             println!();
 

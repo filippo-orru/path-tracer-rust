@@ -15,12 +15,8 @@ fn test_vector_operations() {
     assert_eq!(v1.dot(&v2), 20.0);
     assert_eq!(v1.cross(&v2), Vector::from(-1.0, 2.0, -1.0));
     assert_eq!(
-        Vector::from(1.0, 0.0, 0.0).normalized(),
+        Vector::from(1.0, 0.0, 0.0).normalize(),
         Vector::from(1.0, 0.0, 0.0)
-    );
-    assert_eq!(
-        Vector::from(1.0, 1.0, 0.0).normalized(),
-        Vector::from(0.7071067811865475, 0.7071067811865475, 0.0)
     );
     assert_eq!(
         Vector::from(1.0, 1.0, 0.0).normalize(),
@@ -38,6 +34,12 @@ fn test_helpers() {
     assert_eq!(to_int_with_gamma_correction(1.0), 255);
 }
 
+const TEST_MAT: Material = Material {
+    color: Vector::from(1.0, 0.0, 0.0),
+    emmission: Vector::from(0.0, 0.0, 0.0),
+    reflect_type: ReflectType::Diffuse,
+};
+
 #[test]
 fn test_intersect_scene() {
     let ray = Ray {
@@ -50,11 +52,7 @@ fn test_intersect_scene() {
             position: Vector::from(0.0, 0.0, -3.0),
             radius: 1.0,
         },
-        material: Material {
-            color: Vector::from(1.0, 0.0, 0.0),
-            emmission: Vector::from(0.0, 0.0, 0.0),
-            reflect_type: ReflectType::Diffuse,
-        },
+        material: TEST_MAT,
     }];
 
     let intersection = intersect_scene(&ray, &scene);
@@ -67,6 +65,87 @@ fn test_intersect_scene() {
                 distance: 2.0,
                 xmin: Vector::from(0.0, 0.0, -2.0),
                 nmin: Vector::from(0.0, 0.0, 1.0),
+            }
+        }
+    );
+}
+
+// Test a ray that misses the sphere
+#[test]
+fn test_ray_misses_sphere() {
+    let ray = Ray {
+        direction: Vector::from(1.0, 0.0, -1.0).normalize(),
+        origin: Vector::from(2.0, 0.0, 0.0),
+    };
+
+    let scene = vec![SceneObject {
+        type_: SceneObjectType::Sphere {
+            position: Vector::from(0.0, 0.0, -3.0),
+            radius: 1.0,
+        },
+        material: TEST_MAT,
+    }];
+
+    let intersection = intersect_scene(&ray, &scene);
+    assert_eq!(intersection, SceneIntersectResult::NoHit);
+}
+
+// Test a ray originating inside the sphere
+#[test]
+fn test_ray_inside_sphere() {
+    let ray = Ray {
+        direction: Vector::from(0.0, 0.0, -1.0),
+        origin: Vector::from(0.0, 0.0, 0.0),
+    };
+
+    let scene = vec![SceneObject {
+        type_: SceneObjectType::Sphere {
+            position: Vector::from(0.0, 0.0, 0.0),
+            radius: 1.0,
+        },
+        material: TEST_MAT,
+    }];
+
+    let intersection = intersect_scene(&ray, &scene);
+    // Expected result should account for intersection from inside the sphere
+    assert_eq!(
+        intersection,
+        SceneIntersectResult::Hit {
+            object_id: 0,
+            hit: Hit {
+                distance: 1.0,
+                xmin: Vector::from(0.0, 0.0, -1.0),
+                nmin: Vector::from(0.0, 0.0, -1.0),
+            }
+        }
+    );
+}
+
+// Test a ray that grazes the sphere tangentially
+#[test]
+fn test_ray_tangent_to_sphere() {
+    let ray = Ray {
+        direction: Vector::from(0.0, 0.0, -1.0),
+        origin: Vector::from(0.0, 1.0, 0.0),
+    };
+
+    let scene = vec![SceneObject {
+        type_: SceneObjectType::Sphere {
+            position: Vector::from(0.0, 0.0, -3.0),
+            radius: 1.0,
+        },
+        material: TEST_MAT,
+    }];
+
+    let intersection = intersect_scene(&ray, &scene);
+    assert_eq!(
+        intersection,
+        SceneIntersectResult::Hit {
+            object_id: 0,
+            hit: Hit {
+                distance: 3.0,
+                xmin: Vector::from(0.0, 1.0, -3.0),
+                nmin: Vector::from(0.0, 1.0, 0.0),
             }
         }
     );

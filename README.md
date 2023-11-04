@@ -2,11 +2,9 @@
 
 To better understand the cgrpt path tracer, I ported it to Rust.
 
+![cornell box](static/imgs/cornell-box.png)
+
 ![red sphere](static/imgs/red-sphere.png)
-
-⚠️ Still has some bugs:
-
-![buggy cornell box](static/imgs/cornell-buggy.png)
 
 # Features
 
@@ -16,4 +14,4 @@ To better understand the cgrpt path tracer, I ported it to Rust.
 
 # Performance
 
-In my basic testing with only spheres, it performed equal or better than the C++ version.
+When testing render times with the default cornell box, the Rust version was around 10% faster than the C++ version. All while being *a lot* easier to read and memory safe :)
