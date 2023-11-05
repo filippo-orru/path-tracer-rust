@@ -20,7 +20,7 @@
                 }
             },
             "args": [
-                "500","300", "cornell"
+                "500","300", "mesh"
             ],
             "cwd": "${workspaceFolder}"
         },

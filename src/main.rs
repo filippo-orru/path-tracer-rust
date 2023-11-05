@@ -1,3 +1,9 @@
+mod load_off;
+mod scenes;
+
+#[cfg(test)]
+mod test;
+
 use std::{
     fmt::Display,
     io::Write,
@@ -8,7 +14,9 @@ use std::{
 };
 
 use rayon::prelude::*;
+use scenes::load_scenes;
 
+const USE_CULLING: bool = false;
 const PI: f64 = 3.141592653589793;
 
 /// If true, render with a fixed sequence of random numbers.
@@ -51,55 +59,60 @@ struct Vector {
 impl Add<Self> for Vector {
     type Output = Self;
 
-    fn add(mut self, other: Self) -> Self::Output {
-        self.x += other.x;
-        self.y += other.y;
-        self.z += other.z;
-        return self;
+    fn add(self, other: Self) -> Self::Output {
+        return Vector {
+            x: self.x + other.x,
+            y: self.y + other.y,
+            z: self.z + other.z,
+        };
     }
 }
 
 impl Sub<Self> for Vector {
     type Output = Self;
 
-    fn sub(mut self, other: Self) -> Self::Output {
-        self.x -= other.x;
-        self.y -= other.y;
-        self.z -= other.z;
-        return self;
+    fn sub(self, other: Self) -> Self::Output {
+        return Vector {
+            x: self.x - other.x,
+            y: self.y - other.y,
+            z: self.z - other.z,
+        };
     }
 }
 
 impl Mul<f64> for Vector {
     type Output = Self;
 
-    fn mul(mut self, v: f64) -> Self::Output {
-        self.x *= v;
-        self.y *= v;
-        self.z *= v;
-        return self;
+    fn mul(self, v: f64) -> Self::Output {
+        return Vector {
+            x: self.x * v,
+            y: self.y * v,
+            z: self.z * v,
+        };
     }
 }
 
 impl Div<f64> for Vector {
     type Output = Self;
 
-    fn div(mut self, v: f64) -> Self::Output {
-        self.x /= v;
-        self.y /= v;
-        self.z /= v;
-        return self;
+    fn div(self, v: f64) -> Self::Output {
+        return Vector {
+            x: self.x / v,
+            y: self.y / v,
+            z: self.z / v,
+        };
     }
 }
 
 impl Mul<Self> for Vector {
     type Output = Self;
 
-    fn mul(mut self, other: Self) -> Self::Output {
-        self.x *= other.x;
-        self.y *= other.y;
-        self.z *= other.z;
-        return self;
+    fn mul(self, other: Self) -> Self::Output {
+        return Vector {
+            x: self.x * other.x,
+            y: self.y * other.y,
+            z: self.z * other.z,
+        };
     }
 }
 
@@ -150,32 +163,171 @@ struct Ray {
     direction: Vector,
 }
 
+#[derive(Clone, Debug)]
 enum ReflectType {
     Diffuse,
     Specular,
     Refract,
 }
 
+#[derive(Clone, Debug)]
 struct Material {
     color: Vector,
     emmission: Vector,
     reflect_type: ReflectType,
 }
 
-struct SceneObject {
-    type_: SceneObjectType,
+#[derive(Clone, Debug)]
+pub struct SceneData {
+    id: String,
+    objects: Vec<SceneObjectData>,
+    camera: CameraData,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CameraData {
+    position: Vector,
+    /// normal to sensor plane
+    direction: Vector,
+    /// in meters
+    focal_length: f64,
+}
+
+#[derive(Clone, Debug)]
+struct SceneObjectData {
+    type_: SceneObject,
+    position: Vector,
     material: Material,
 }
 
-enum SceneObjectType {
-    Sphere { position: Vector, radius: f64 },
+impl SceneObjectData {
+    fn intersect(&self, ray: &Ray) -> IntersectResult {
+        return match &self.type_ {
+            SceneObject::Sphere { radius } => intersect_sphere(self.position, *radius, ray),
+
+            SceneObject::Mesh(mesh) => match intersect_sphere(
+                mesh.bounding_sphere.position + self.position,
+                mesh.bounding_sphere.radius,
+                ray,
+            ) {
+                IntersectResult::NoHit => IntersectResult::NoHit,
+                IntersectResult::Hit(_) => {
+                    for original_tri in mesh.triangles.iter() {
+                        let tri = original_tri.transformed(&self.position);
+                        let va_vb = tri.b - tri.a;
+                        let va_vc = tri.c - tri.a;
+
+                        let pvec = ray.direction.cross(&va_vc);
+                        let determinant = va_vb.dot(&pvec);
+
+                        if USE_CULLING {
+                            if determinant < 1e-4 {
+                                continue;
+                            }
+                        } else {
+                            if determinant.abs() < 1e-4 {
+                                continue;
+                            }
+                        }
+
+                        let inv_determinant = 1.0 / determinant;
+                        let tvec = ray.origin - tri.a;
+                        let u: f64 = tvec.dot(&pvec) * inv_determinant;
+                        if u < 0.0 || u > 1.0 {
+                            continue;
+                        }
+
+                        let qvec = tvec.cross(&va_vb);
+                        let v: f64 = ray.direction.dot(&qvec) * inv_determinant;
+                        if v < 0.0 || (u + v) > 1.0 {
+                            continue;
+                        }
+
+                        let distance: f64 = va_vb.dot(&qvec) * inv_determinant;
+                        let intersection = ray.direction * distance;
+                        let normal = va_vb.cross(&va_vc).normalize();
+
+                        return IntersectResult::Hit(Hit {
+                            distance,
+                            intersection,
+                            normal,
+                        });
+                    }
+                    return IntersectResult::NoHit;
+                }
+            },
+        };
+    }
+}
+
+#[derive(Clone, Debug)]
+enum SceneObject {
+    Sphere { radius: f64 },
+    Mesh(Mesh),
+}
+
+#[derive(Clone, Debug)]
+struct StandaloneSphere {
+    position: Vector,
+    radius: f64,
+}
+
+fn intersect_sphere(position: Vector, radius: f64, ray: &Ray) -> IntersectResult {
+    let op: Vector = position - ray.origin;
+    let eps: f64 = 1e-4;
+    let b = op.dot(&ray.direction);
+    let mut det = b.powi(2) - op.dot(&op) + radius.powi(2);
+    if det < 0.0 {
+        return IntersectResult::NoHit;
+    } else {
+        det = det.sqrt();
+    }
+    let t = if b - det >= eps {
+        b - det
+    } else if b + det >= eps {
+        b + det
+    } else {
+        return IntersectResult::NoHit;
+    };
+
+    let xmin = ray.origin + ray.direction * t;
+    let nmin = (xmin - position).normalize();
+
+    return IntersectResult::Hit(Hit {
+        distance: t,
+        intersection: xmin,
+        normal: nmin,
+    });
+}
+
+#[derive(Clone, Debug)]
+struct Mesh {
+    triangles: Vec<Triangle>,
+    bounding_sphere: StandaloneSphere,
+}
+
+#[derive(Clone, Debug)]
+struct Triangle {
+    a: Vector,
+    b: Vector,
+    c: Vector,
+}
+
+impl Triangle {
+    fn transformed(&self, v: &Vector) -> Triangle {
+        Triangle {
+            a: self.a + *v,
+            b: self.b + *v,
+            c: self.c + *v,
+        }
+    }
 }
 
 #[derive(PartialEq, Debug)]
 struct Hit {
     distance: f64,
-    xmin: Vector,
-    nmin: Vector,
+    intersection: Vector,
+    normal: Vector,
 }
 
 enum IntersectResult {
@@ -189,46 +341,12 @@ enum SceneIntersectResult {
     Hit { object_id: usize, hit: Hit },
 }
 
-impl SceneObjectType {
-    fn intersect(&self, ray: &Ray) -> IntersectResult {
-        match *self {
-            SceneObjectType::Sphere { position, radius } => {
-                let op: Vector = position - ray.origin;
-                let eps: f64 = 1e-4;
-                let b = op.dot(&ray.direction);
-                let mut det = b.powi(2) - op.dot(&op) + radius.powi(2);
-                if det < 0.0 {
-                    return IntersectResult::NoHit;
-                } else {
-                    det = det.sqrt();
-                }
-                let t = if b - det >= eps {
-                    b - det
-                } else if b + det >= eps {
-                    b + det
-                } else {
-                    return IntersectResult::NoHit;
-                };
-
-                let xmin = ray.origin + ray.direction * t;
-                let nmin = (xmin - position).normalize();
-
-                return IntersectResult::Hit(Hit {
-                    distance: t,
-                    xmin,
-                    nmin,
-                });
-            }
-        }
-    }
-}
-
-fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObject>) -> SceneIntersectResult {
+fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObjectData>) -> SceneIntersectResult {
     let mut min_intersect: SceneIntersectResult = SceneIntersectResult::NoHit;
 
     for i in (0..scene_objects.len()).rev() {
         let scene_object = &scene_objects[i];
-        let intersect = scene_object.type_.intersect(ray);
+        let intersect = scene_object.intersect(ray);
         match (intersect, &min_intersect) {
             (IntersectResult::NoHit, _) => (),
             (IntersectResult::Hit(new_hit), SceneIntersectResult::NoHit) => {
@@ -237,7 +355,7 @@ fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObject>) -> SceneIntersec
                     hit: new_hit,
                 };
             }
-            (IntersectResult::Hit(new_hit), SceneIntersectResult::Hit {  hit , ..}) => {
+            (IntersectResult::Hit(new_hit), SceneIntersectResult::Hit { hit, .. }) => {
                 if new_hit.distance < hit.distance {
                     min_intersect = SceneIntersectResult::Hit {
                         object_id: i,
@@ -251,17 +369,17 @@ fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObject>) -> SceneIntersec
 }
 
 const MAX_DEPTH: usize = 12;
-fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector {
+fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Vector {
     return match intersect_scene(&ray, scene_objects) {
         SceneIntersectResult::NoHit => Vector::zero(),
         SceneIntersectResult::Hit { object_id, hit } => {
             let object = &scene_objects[object_id];
             let mut color: Vector = object.material.color;
             let max_reflection = color.x.max(color.y.max(color.z));
-            let normal_towards_ray = if hit.nmin.dot(&ray.direction) < 0.0 {
-                hit.nmin
+            let normal_towards_ray = if hit.normal.dot(&ray.direction) < 0.0 {
+                hit.normal
             } else {
-                hit.nmin * -1.0
+                hit.normal * -1.0
             };
 
             //--- Russian Roulette Ray termination
@@ -298,7 +416,7 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
                         color
                             * radiance(
                                 &Ray {
-                                    origin: hit.xmin,
+                                    origin: hit.intersection,
                                     direction: d,
                                 },
                                 new_depth,
@@ -310,9 +428,9 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
                         color
                             * radiance(
                                 &Ray {
-                                    origin: hit.xmin,
+                                    origin: hit.intersection,
                                     direction: ray.direction
-                                        - hit.nmin * 2.0 * hit.nmin.dot(&ray.direction),
+                                        - hit.normal * 2.0 * hit.normal.dot(&ray.direction),
                                 },
                                 new_depth,
                                 scene_objects,
@@ -321,11 +439,11 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
                     ReflectType::Refract => {
                         // Ideal dielectric REFRACTION
                         let refl_ray = Ray {
-                            origin: hit.xmin,
+                            origin: hit.intersection,
                             direction: ray.direction
-                                - hit.nmin * 2.0 * hit.nmin.dot(&ray.direction),
+                                - hit.normal * 2.0 * hit.normal.dot(&ray.direction),
                         };
-                        let into = hit.nmin.dot(&normal_towards_ray) > 0.0; // Ray from outside going in?
+                        let into = hit.normal.dot(&normal_towards_ray) > 0.0; // Ray from outside going in?
                         let nc = 1.0; // Index of refraction air
                         let nt = 1.5; // Index of refraction glass
                         let nnt: f64 = if into { nc / nt } else { nt / nc };
@@ -336,13 +454,13 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
                             color * radiance(&refl_ray, new_depth, scene_objects)
                         } else {
                             let tdir = (ray.direction * nnt
-                                - hit.nmin
+                                - hit.normal
                                     * (if into { 1.0 } else { -1.0 } * (ddn * nnt + cos2t.sqrt())))
                             .normalize();
                             let a = nt - nc;
                             let b = nt + nc;
                             let r0 = a * a / (b * b);
-                            let c = 1.0 - (if into { -ddn } else { tdir.dot(&hit.nmin) });
+                            let c = 1.0 - (if into { -ddn } else { tdir.dot(&hit.normal) });
                             let re = r0 + (1.0 - r0) * c.powi(5);
                             let tr = 1.0 - re;
                             let p = 0.25 + 0.5 * re;
@@ -356,7 +474,7 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
                                     color
                                         * radiance(
                                             &Ray {
-                                                origin: hit.xmin,
+                                                origin: hit.intersection,
                                                 direction: tdir,
                                             },
                                             new_depth,
@@ -369,7 +487,7 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObject>) -> Vector
                                     * (radiance(&refl_ray, new_depth, scene_objects) * re
                                         + radiance(
                                             &Ray {
-                                                origin: hit.xmin,
+                                                origin: hit.intersection,
                                                 direction: tdir,
                                             },
                                             new_depth,
@@ -436,218 +554,13 @@ impl RenderConfig {
 fn main() {
     let time_start = std::time::Instant::now();
 
-    // Set up scene
-    const BOX_DIMENSIONS: Vector = Vector {
-        x: 2.6,
-        y: 2.0,
-        z: 2.8,
-    };
-
-    // scene_id to scene_objects
-    let scenes: Vec<(&str, Vec<SceneObject>)> = [
-        (
-            "single-sphere",
-            vec![SceneObject {
-                type_: SceneObjectType::Sphere {
-                    position: Vector::from(0.0, 0.0, 0.0),
-                    radius: 1.0,
-                },
-                material: Material {
-                    color: Vector::from(1.0, 1.0, 1.0),
-                    emmission: Vector::from(0.98 * 15.0, 15.0, 0.9 * 15.0),
-                    reflect_type: ReflectType::Diffuse,
-                },
-            }],
-        ),
-        (
-            "two-spheres",
-            vec![
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(0.0, 0.0, 0.0),
-                        radius: 1.0,
-                    },
-                    material: Material {
-                        color: Vector::from(1.0, 0.0, 0.0),
-                        emmission: Vector::from(0.0, 0.0, 0.0),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(0.0, 0.0, 10.0),
-                        radius: 1.0,
-                    },
-                    material: Material {
-                        color: Vector::from(0.0, 0.0, 0.0),
-                        emmission: Vector::uniform(10.0),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-            ],
-        ),
-        (
-            "three-spheres",
-            vec![
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(0.0, 0.0, -3.0),
-                        radius: 1.0,
-                    },
-                    material: Material {
-                        color: Vector::from(1.0, 0.2, 0.2),
-                        emmission: Vector::from(0.0, 0.0, 0.0),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(4.0, 2.0, 0.0),
-                        radius: 1.0,
-                    },
-                    material: Material {
-                        color: Vector::from(0.0, 0.0, 0.0),
-                        emmission: Vector::from(20.0, 10.0, 10.0),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(-6.0, -2.0, 0.0),
-                        radius: 1.0,
-                    },
-                    material: Material {
-                        color: Vector::from(0.0, 0.0, 0.0),
-                        emmission: Vector::from(5.0, 9.0, 20.0),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-            ],
-        ),
-        (
-            "cornell",
-            vec![
-                // Cornell Box centered in the origin (0, 0, 0)
-                // Left
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(-1e5 - BOX_DIMENSIONS.x, 0.0, 0.0),
-                        radius: 1e5,
-                    },
-                    material: Material {
-                        color: Vector::from(0.85, 0.25, 0.25),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-                // Right
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(1e5 + BOX_DIMENSIONS.x, 0.0, 0.0),
-                        radius: 1e5,
-                    },
-                    material: Material {
-                        color: Vector::from(0.25, 0.35, 0.85),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-                // Top
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(0.0, 1e5 + BOX_DIMENSIONS.y, 0.0),
-                        radius: 1e5,
-                    },
-                    material: Material {
-                        color: Vector::from(0.75, 0.75, 0.75),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-                // Bottom
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(0.0, -1e5 - BOX_DIMENSIONS.y, 0.0),
-                        radius: 1e5,
-                    },
-                    material: Material {
-                        color: Vector::from(0.75, 0.75, 0.75),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-                // Back
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(0.0, 0.0, -1e5 - BOX_DIMENSIONS.z),
-                        radius: 1e5,
-                    },
-                    material: Material {
-                        color: Vector::from(0.75, 0.75, 0.75),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-                // Front
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(0.0, 0.0, 1e5 + 3.0 * BOX_DIMENSIONS.z - 0.5),
-                        radius: 1e5,
-                    },
-                    material: Material {
-                        color: Vector::zero(),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-                // Objects
-                // mirroring
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(-1.3, -BOX_DIMENSIONS.y + 0.8, -1.3),
-                        radius: 0.8,
-                    },
-                    material: Material {
-                        color: Vector::uniform(0.999),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Specular,
-                    },
-                },
-                // refracting
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(1.3, -BOX_DIMENSIONS.y + 0.8, -0.2),
-                        radius: 0.8,
-                    },
-                    material: Material {
-                        color: Vector::uniform(0.999),
-                        emmission: Vector::zero(),
-                        reflect_type: ReflectType::Refract,
-                    },
-                },
-                // The ceiling area light source (slightly yellowish color)
-                SceneObject {
-                    type_: SceneObjectType::Sphere {
-                        position: Vector::from(0.0, BOX_DIMENSIONS.y + 10.0 - 0.04, 0.0),
-                        radius: 10.0,
-                    },
-                    material: Material {
-                        color: Vector::zero(),
-                        // emmission: Vector::from(0.98 * 2.0, 2.0, 0.9 * 2.0),
-                        emmission: Vector::from(0.98, 1.0, 0.9) * 15.0,
-                        reflect_type: ReflectType::Diffuse,
-                    },
-                },
-            ],
-        ),
-    ]
-    .into();
+    let scenes = load_scenes();
 
     let print_usage = || {
         println!(
             "Run with:\ncargo run <samplesPerPixel = 4000> <y-resolution = 600> <scene = '{}'>\n\nScenes: {}",
-            scenes.iter().next().unwrap().0,
-            scenes.iter().enumerate().map(|(i, scene)| format!("{}: {}", i, scene.0)).collect::<Vec<_>>().join(", ")
+            scenes.iter().next().unwrap().id,
+            scenes.iter().enumerate().map(|(i, scene)| format!("{}: {}", i, scene.id)).collect::<Vec<_>>().join(", ")
         );
     };
 
@@ -658,25 +571,24 @@ fn main() {
             exit(1);
         }
         Some(render_config) => {
-            let scene_objects: &Vec<SceneObject> = &match render_config.scene_id.clone() {
+            let scene: &SceneData = match render_config.scene_id.clone() {
                 SceneId::Int(i) => scenes.get(i),
-                SceneId::String(s) => scenes.iter().find(|scene| scene.0 == s.as_str()),
+                SceneId::String(s) => scenes.iter().find(|scene| scene.id == s.as_str()),
             }
             .unwrap_or_else(|| {
                 print_usage();
                 exit(1);
-            })
-            .1;
+            });
+            let scene_objects = &scene.objects;
 
             //-- setup sensor
-            let sensor_origin: Vector =
-                Vector::from(0.0, 0.26 * BOX_DIMENSIONS.y, 3.0 * BOX_DIMENSIONS.z - 1.0);
-            // normal to sensor plane
-            let sensor_view_direction: Vector = Vector::from(0.0, -0.06, -1.0).normalize();
+            let sensor_origin: Vector = scene.camera.position;
+            let sensor_view_direction: Vector = scene.camera.direction.normalize();
             let sensor_width: f64 = 0.036;
-            let sensor_height: f64 = 0.024;
-            // in meters
-            let focal_length: f64 = 0.035;
+            let sensor_height: f64 = sensor_width * 2.0 / 3.0;
+            let focal_length: f64 = scene.camera.focal_length;
+            // lens center (pinhole)
+            let lens_center = sensor_origin + sensor_view_direction * focal_length;
 
             //-- orthogonal axes spanning the sensor plane
             let su: Vector = sensor_view_direction
@@ -778,8 +690,6 @@ fn main() {
 
                     // 3d sample position on sensor
                     let sensor_pos = sensor_origin + su * sx + sv * sy;
-                    // lens center (pinhole)
-                    let lens_center = sensor_origin + sensor_view_direction * focal_length;
                     let ray_direction = (lens_center - sensor_pos).normalize();
                     // ray through pinhole
                     let ray = Ray {
@@ -791,7 +701,7 @@ fn main() {
                     radiance_v = radiance_v + radiance(&ray, 0, &scene_objects);
                 }
                 // normalize radiance by number of samples
-                radiance_v = radiance_v / render_config.samples_per_pixel as f64; 
+                radiance_v = radiance_v / render_config.samples_per_pixel as f64;
                 processed_pixel_count.fetch_add(1, atomic::Ordering::Relaxed);
 
                 Vector::from(
@@ -814,14 +724,14 @@ fn main() {
             std::fs::create_dir_all("out").unwrap();
 
             // Write .ppm file
-            let mut file = std::fs::File::create(format!(
+            let path = format!(
                 "out/{}-scene-{}-spp{}-res{}-.ppm",
                 chrono::Local::now().format("%Y-%m-%d_%H:%M:%S").to_string(),
                 render_config.scene_id,
                 render_config.samples_per_pixel,
                 render_config.resolution_y,
-            ))
-            .unwrap();
+            );
+            let mut file = std::fs::File::create(path.clone()).unwrap();
             file.write_all(b"P3\n").unwrap();
             file.write_all(
                 format!(
@@ -857,9 +767,18 @@ fn main() {
                 )
                 .unwrap();
             }
+
+            // Create symlink for easy access to newest image
+            std::fs::remove_file("latest.ppm").unwrap_or_default();
+            match std::os::unix::fs::symlink(path.clone(), "latest.ppm") {
+                Ok(_) => (),
+                Err(_) => {
+                    println!(
+                        "Could not create symlink to latest image. You can find it at {}",
+                        path
+                    );
+                }
+            }
         }
     }
 }
-
-#[cfg(test)]
-mod test;

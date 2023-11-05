@@ -47,9 +47,9 @@ fn test_intersect_scene() {
         origin: Vector::from(0.0, 0.0, 0.0),
     };
 
-    let scene = vec![SceneObject {
-        type_: SceneObjectType::Sphere {
-            position: Vector::from(0.0, 0.0, -3.0),
+    let scene = vec![SceneObjectData {
+        position: Vector::from(0.0, 0.0, -3.0),
+        type_: SceneObject::Sphere {
             radius: 1.0,
         },
         material: TEST_MAT,
@@ -63,8 +63,8 @@ fn test_intersect_scene() {
             object_id: 0,
             hit: Hit {
                 distance: 2.0,
-                xmin: Vector::from(0.0, 0.0, -2.0),
-                nmin: Vector::from(0.0, 0.0, 1.0),
+                intersection: Vector::from(0.0, 0.0, -2.0),
+                normal: Vector::from(0.0, 0.0, 1.0),
             }
         }
     );
@@ -78,9 +78,9 @@ fn test_ray_misses_sphere() {
         origin: Vector::from(2.0, 0.0, 0.0),
     };
 
-    let scene = vec![SceneObject {
-        type_: SceneObjectType::Sphere {
-            position: Vector::from(0.0, 0.0, -3.0),
+    let scene = vec![SceneObjectData {
+        position: Vector::from(0.0, 0.0, -3.0),
+        type_: SceneObject::Sphere {
             radius: 1.0,
         },
         material: TEST_MAT,
@@ -98,9 +98,9 @@ fn test_ray_inside_sphere() {
         origin: Vector::from(0.0, 0.0, 0.0),
     };
 
-    let scene = vec![SceneObject {
-        type_: SceneObjectType::Sphere {
-            position: Vector::from(0.0, 0.0, 0.0),
+    let scene = vec![SceneObjectData {
+        position: Vector::from(0.0, 0.0, 0.0),
+        type_: SceneObject::Sphere {
             radius: 1.0,
         },
         material: TEST_MAT,
@@ -114,8 +114,8 @@ fn test_ray_inside_sphere() {
             object_id: 0,
             hit: Hit {
                 distance: 1.0,
-                xmin: Vector::from(0.0, 0.0, -1.0),
-                nmin: Vector::from(0.0, 0.0, -1.0),
+                intersection: Vector::from(0.0, 0.0, -1.0),
+                normal: Vector::from(0.0, 0.0, -1.0),
             }
         }
     );
@@ -129,9 +129,9 @@ fn test_ray_tangent_to_sphere() {
         origin: Vector::from(0.0, 1.0, 0.0),
     };
 
-    let scene = vec![SceneObject {
-        type_: SceneObjectType::Sphere {
-            position: Vector::from(0.0, 0.0, -3.0),
+    let scene = vec![SceneObjectData {
+        position: Vector::from(0.0, 0.0, -3.0),
+        type_: SceneObject::Sphere {
             radius: 1.0,
         },
         material: TEST_MAT,
@@ -144,8 +144,8 @@ fn test_ray_tangent_to_sphere() {
             object_id: 0,
             hit: Hit {
                 distance: 3.0,
-                xmin: Vector::from(0.0, 1.0, -3.0),
-                nmin: Vector::from(0.0, 1.0, 0.0),
+                intersection: Vector::from(0.0, 1.0, -3.0),
+                normal: Vector::from(0.0, 1.0, 0.0),
             }
         }
     );
@@ -154,9 +154,9 @@ fn test_ray_tangent_to_sphere() {
 #[test]
 fn test_radiance() {
     let scene = vec![
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, 0.0, -3.0),
+        SceneObjectData {
+            position: Vector::from(0.0, 0.0, -3.0),
+            type_: SceneObject::Sphere {
                 radius: 1.0,
             },
             material: Material {
@@ -165,9 +165,9 @@ fn test_radiance() {
                 reflect_type: ReflectType::Diffuse,
             },
         },
-        SceneObject {
-            type_: SceneObjectType::Sphere {
-                position: Vector::from(0.0, 0.0, 10.0),
+        SceneObjectData {
+            position: Vector::from(0.0, 0.0, 10.0),
+            type_: SceneObject::Sphere {
                 radius: 1.0,
             },
             material: Material {
