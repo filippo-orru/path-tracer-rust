@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# rand
+iced = { version = "0.13.1", features = ["canvas", "async-std"] }
 rand = "0.8.5"
 chrono = "0.4.19"
 rayon = "1.5.1"

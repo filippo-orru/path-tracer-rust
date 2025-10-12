@@ -3,7 +3,7 @@ use std::{
     io::{BufRead, BufReader},
 };
 
-use crate::{Mesh, StandaloneSphere, Triangle, Vector};
+use super::{Mesh, StandaloneSphere, Triangle, Vector};
 
 pub(crate) fn load_off(path: &str, scale: f64) -> Result<Mesh, std::io::Error> {
     let file = File::open(path).unwrap();
@@ -50,7 +50,7 @@ pub(crate) fn load_off(path: &str, scale: f64) -> Result<Mesh, std::io::Error> {
         if coords.len() != 3 {
             return bad_data("Invalid vertex coordinates");
         }
-        let vert = Vector::from(coords[0].unwrap(), coords[1].unwrap(), coords[2].unwrap()) * scale; 
+        let vert = Vector::from(coords[0].unwrap(), coords[1].unwrap(), coords[2].unwrap()) * scale;
         vertices.push(vert);
 
         if vert.x < min_vert.x {
@@ -81,10 +81,13 @@ pub(crate) fn load_off(path: &str, scale: f64) -> Result<Mesh, std::io::Error> {
     };
     let bounding_sphere = StandaloneSphere {
         position: bounding_sphere_pos,
-        radius: *vec![(min_vert - bounding_sphere_pos).magnitude(), (max_vert - bounding_sphere_pos).magnitude()]
-            .iter()
-            .max_by(|p1, p2| p1.partial_cmp(&p2).unwrap())
-            .unwrap(),
+        radius: *vec![
+            (min_vert - bounding_sphere_pos).magnitude(),
+            (max_vert - bounding_sphere_pos).magnitude(),
+        ]
+        .iter()
+        .max_by(|p1, p2| p1.partial_cmp(&p2).unwrap())
+        .unwrap(),
     };
 
     let mut triangles: Vec<Triangle> = Vec::with_capacity(face_count);

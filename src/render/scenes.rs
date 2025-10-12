@@ -1,4 +1,4 @@
-use crate::{
+use super::{
     load_off::load_off, CameraData, Material, ReflectType, SceneData, SceneObject, SceneObjectData,
     Vector,
 };
