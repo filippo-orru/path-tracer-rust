@@ -1,23 +1,25 @@
 use iced::alignment::Horizontal;
 use iced::futures::channel::mpsc;
-use iced::futures::channel::mpsc::SendError;
-use iced::futures::future;
+use iced::futures::channel::oneshot;
 use iced::futures::SinkExt;
 use iced::futures::Stream;
 use iced::futures::StreamExt;
 use iced::stream::channel;
 use iced::widget::combo_box;
+use iced::widget::text_input;
 use iced::widget::{button, canvas, column, container, text};
 use iced::window::{Position, Settings};
-use iced::Length::Fill;
+use iced::Length;
 use iced::{application, Color, Element, Point, Size, Subscription};
 use iced::{mouse, Rectangle, Renderer, Theme};
 
 use crate::render::gamma_correction;
 use crate::render::render;
+use crate::render::scenes::load_scenes;
+use crate::render::Image;
 use crate::render::RenderConfig;
-use crate::render::RenderResult;
 use crate::render::RenderUpdate;
+use crate::render::SceneData;
 
 mod render;
 
@@ -39,38 +41,99 @@ fn main() -> iced::Result {
 
 struct State {
     renderer_channel: Option<mpsc::Sender<RendererInput>>,
+
+    scenes: Vec<SceneData>,
+    scene_ids_selector: combo_box::State<String>,
+    selected_scene_id: String,
+
+    resolution_y: String,
+    samples_per_pixel: String,
+
+    config_has_error: Option<String>,
+
     rendering: RenderState,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        let scenes = load_scenes();
+        let selected_scene_id = scenes.get(0).unwrap().id.clone();
+        Self {
+            renderer_channel: None,
+            scene_ids_selector: combo_box::State::with_selection(
+                scenes.iter().map(|scene| scene.id.clone()).collect(),
+                None, // Some(selected_scene_id.clone()).as_ref(),
+            ),
+            selected_scene_id,
+            scenes,
+            resolution_y: "300".to_owned(),
+            samples_per_pixel: "1000".to_owned(),
+            config_has_error: None,
+            rendering: RenderState::NotRendering,
+        }
+    }
 }
 
 enum RenderState {
     NotRendering,
-    Rendering { progress: f64 },
-    Done { result: RenderResult },
+    Pending,
+    Rendering { update: RenderUpdate },
+    Done { result: Image },
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     LinkSender(mpsc::Sender<RendererInput>),
     StartRender,
-    RenderingProgress(f64),
-    RenderingDone(RenderResult),
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            renderer_channel: None,
-            rendering: RenderState::NotRendering,
-        }
-    }
+    RenderingProgress(RenderUpdate),
+    RenderingDone(Image),
+    SelectScene(String),
+    UpdateResolutionY(String),
+    UpdateSamplesPerPixel(String),
 }
 
 fn update(state: &mut State, message: Message) {
     match message {
         Message::StartRender => {
-            state.rendering = RenderState::Rendering { progress: 0.0 };
-            if let Some(channel) = &mut state.renderer_channel {
-                let _ = channel.try_send(RendererInput::StartRendering);
+            if let RenderState::Rendering { .. } = state.rendering {
+                return;
+            }
+            if let Ok(res_y) = state.resolution_y.parse::<usize>() {
+                if res_y == 0 || res_y > 2000 {
+                    state.config_has_error =
+                        Some("Resolution Y must be between 1 and 2000".to_owned());
+                    return;
+                }
+
+                if let Ok(spp) = state.samples_per_pixel.parse::<usize>() {
+                    if spp == 0 || spp > 10_000 {
+                        state.config_has_error =
+                            Some("Samples per pixel must be between 1 and 10000".to_owned());
+                        return;
+                    }
+
+                    state.rendering = RenderState::Pending;
+                    if let Some(channel) = &mut state.renderer_channel {
+                        let _ = channel.try_send(RendererInput::StartRendering {
+                            config: RenderConfig {
+                                samples_per_pixel: spp,
+                                resolution_y: res_y,
+                                scene: state
+                                    .scenes
+                                    .iter()
+                                    .find(|scene| scene.id == state.selected_scene_id)
+                                    .unwrap()
+                                    .clone(),
+                            },
+                        });
+                    }
+                } else {
+                    state.config_has_error = Some("Samples per pixel must be a number".to_owned());
+                    return;
+                }
+            } else {
+                state.config_has_error = Some("Resolution Y must be a number".to_owned());
+                return;
             }
         }
         Message::RenderingDone(result) => {
@@ -79,9 +142,12 @@ fn update(state: &mut State, message: Message) {
         Message::LinkSender(sender) => {
             state.renderer_channel = Some(sender);
         }
-        Message::RenderingProgress(progress) => {
-            state.rendering = RenderState::Rendering { progress };
+        Message::RenderingProgress(update) => {
+            state.rendering = RenderState::Rendering { update };
         }
+        Message::SelectScene(id) => state.selected_scene_id = id,
+        Message::UpdateResolutionY(value) => state.resolution_y = value,
+        Message::UpdateSamplesPerPixel(value) => state.samples_per_pixel = value,
     }
 }
 
@@ -90,23 +156,62 @@ fn view(state: &State) -> Element<'_, Message> {
         column![
             text(match &state.rendering {
                 RenderState::NotRendering => "Not rendering".to_owned(),
-                RenderState::Rendering { progress } =>
-                    format!("Rendering... {:.2}%", progress * 100.0),
+                RenderState::Pending => "Pending...".to_owned(),
+                RenderState::Rendering { update } =>
+                    format!("Rendering... {:.2}%", update.progress * 100.0),
                 RenderState::Done { result } => format!(
                     "Render done! ({}x{})",
                     result.resolution.0, result.resolution.1
                 ),
             }),
-            // combo_box(),
+            container(
+                combo_box(
+                    &state.scene_ids_selector,
+                    "Select scene",
+                    Some(&state.selected_scene_id),
+                    Message::SelectScene
+                )
+                .width(250)
+            )
+            .padding(10)
+            .center_x(Length::Shrink),
+            text("Resolution Y"),
+            container(
+                text_input("Resolution Y", &state.resolution_y.to_string())
+                    .on_input(Message::UpdateResolutionY)
+                    .width(250)
+            )
+            .padding(10)
+            .center_x(Length::Shrink),
+            text("Samples per pixel"),
+            container(
+                text_input("Samples per pixel", &state.samples_per_pixel.to_string())
+                    .on_input(Message::UpdateSamplesPerPixel)
+                    .width(250)
+            )
+            .padding(10)
+            .center_x(Length::Shrink),
+            if let Some(err) = &state.config_has_error {
+                text(err).color(Color::from_rgb(1.0, 0.0, 0.0))
+            } else {
+                text("")
+            },
             match &state.rendering {
                 RenderState::NotRendering => container(text("")),
-                RenderState::Rendering { progress: _ } => container(text("")),
-                RenderState::Done { result } => container(
+                RenderState::Pending => container(text("")),
+                RenderState::Rendering { update } => container(
                     canvas(CanvasState {
-                        result: Some(result),
+                        image: &update.image,
                     })
-                    .width(result.resolution.0 as f32)
-                    .height(result.resolution.1 as f32)
+                    .width(update.image.resolution.0 as f32)
+                    .height(update.image.resolution.1 as f32)
+                )
+                .padding(20),
+
+                RenderState::Done { result } => container(
+                    canvas(CanvasState { image: result })
+                        .width(result.resolution.0 as f32)
+                        .height(result.resolution.1 as f32)
                 )
                 .padding(20),
             },
@@ -114,7 +219,7 @@ fn view(state: &State) -> Element<'_, Message> {
         ]
         .align_x(Horizontal::Center),
     )
-    .center(Fill)
+    .center(Length::Fill)
     .into()
 }
 
@@ -122,17 +227,19 @@ fn view(state: &State) -> Element<'_, Message> {
 // First, we define the data we need for drawing
 #[derive(Debug)]
 struct CanvasState<'a> {
-    result: Option<&'a RenderResult>,
+    image: &'a Image,
 }
 
 struct CanvasCache {
     cache: canvas::Cache,
+    last_hash: u64,
 }
 
 impl Default for CanvasCache {
     fn default() -> Self {
         Self {
             cache: canvas::Cache::new(),
+            last_hash: 0,
         }
     }
 }
@@ -150,45 +257,41 @@ impl<Message> canvas::Program<Message> for CanvasState<'_> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
+        // TODO Compute a hash of the image data to determine if it has changed
+        // let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        _state.cache.clear();
+
         let geometry = _state.cache.draw(renderer, bounds.size(), |frame| {
-            // First, we draw the background
+            // background
             frame.fill_rectangle(
                 Point { x: 0.0, y: 0.0 },
                 bounds.size(),
                 Color::from_rgb(0.0, 0.0, 0.0),
             );
 
-            if let Some(result) = self.result {
-                let (resx, resy) = result.resolution;
-                let scale_x = bounds.width / resx as f32;
-                let scale_y = bounds.height / resy as f32;
+            let (resx, resy) = self.image.resolution;
+            let scale_x = bounds.width / resx as f32;
+            let scale_y = bounds.height / resy as f32;
 
-                for y in 0..resy {
-                    for x in 0..resx {
-                        let color = result.pixels[y * resx + x];
-                        let red = gamma_correction(color.x);
-                        let green = gamma_correction(color.y);
-                        let blue = gamma_correction(color.z);
-                        frame.fill_rectangle(
-                            Point {
-                                x: x as f32 * scale_x,
-                                y: y as f32 * scale_y,
-                            },
-                            Size {
-                                width: scale_x + 1.0,
-                                height: scale_y + 1.0,
-                            },
-                            Color::from_rgb(red as f32, green as f32, blue as f32),
-                        );
-                    }
+            for y in 0..resy {
+                for x in 0..resx {
+                    let color = self.image.pixels[(resy - y - 1) * resx + x];
+                    let red = gamma_correction(color.x);
+                    let green = gamma_correction(color.y);
+                    let blue = gamma_correction(color.z);
+                    // println!("Pixel ({}, {}) = ({}, {}, {})", x, y, red, green, blue);
+                    frame.fill_rectangle(
+                        Point {
+                            x: x as f32 * scale_x,
+                            y: y as f32 * scale_y,
+                        },
+                        Size {
+                            width: scale_x + 1.0,
+                            height: scale_y + 1.0,
+                        },
+                        Color::from_rgb(red as f32, green as f32, blue as f32),
+                    );
                 }
-            } else {
-                // Background
-                frame.fill_rectangle(
-                    Point { x: 0.0, y: 0.0 },
-                    bounds.size(),
-                    Color::from_rgb(0.1, 0.1, 0.1),
-                );
             }
         });
 
@@ -197,7 +300,7 @@ impl<Message> canvas::Program<Message> for CanvasState<'_> {
 }
 
 enum RendererInput {
-    StartRendering,
+    StartRendering { config: RenderConfig },
 }
 
 fn render_worker() -> impl Stream<Item = Message> {
@@ -213,15 +316,21 @@ fn render_worker() -> impl Stream<Item = Message> {
             let input = receiver.select_next_some().await;
 
             match input {
-                RendererInput::StartRendering => {
-                    // let (render_sender, mut render_receiver) = mpsc::channel::<RenderUpdate>(100);
-                    let render_info_sender = output.clone().with(|render_update: RenderUpdate| {
-                        future::ready(Ok::<Message, SendError>(Message::RenderingProgress(
-                            render_update.progress,
-                        )))
+                RendererInput::StartRendering { config } => {
+                    let (progress_sender, mut progress_receiver) =
+                        mpsc::channel::<RenderUpdate>(100);
+                    let (result_sender, result_receiver) = oneshot::channel();
+                    std::thread::spawn(move || {
+                        let mut sender = progress_sender;
+                        let result = render(config, &mut sender);
+                        let _ = result_sender.send(result);
                     });
-                    let result = render(RenderConfig::default(), render_info_sender);
-                    let _ = output.send(Message::RenderingDone(result)).await;
+                    while let Some(update) = progress_receiver.next().await {
+                        let _ = output.send(Message::RenderingProgress(update)).await;
+                    }
+                    if let Ok(result) = result_receiver.await {
+                        let _ = output.send(Message::RenderingDone(result)).await;
+                    }
                 }
             }
         }

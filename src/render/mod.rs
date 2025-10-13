@@ -1,5 +1,5 @@
 mod load_off;
-mod scenes;
+pub mod scenes;
 
 #[cfg(test)]
 mod test;
@@ -9,11 +9,13 @@ use std::{
     io::Write,
     ops::{Add, Div, Mul, Sub},
     process::exit,
-    sync::atomic,
-    time::Duration,
+    sync::{atomic, mpsc, Arc},
+    thread,
+    time::{Duration, Instant},
 };
 
-use iced::futures::{Sink, SinkExt};
+use iced::futures::{self, channel::mpsc::SendError, Sink, SinkExt};
+use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use scenes::load_scenes;
 
@@ -184,7 +186,7 @@ struct Material {
 
 #[derive(Clone, Debug)]
 pub struct SceneData {
-    id: String,
+    pub id: String,
     objects: Vec<SceneObjectData>,
     camera: CameraData,
 }
@@ -507,17 +509,18 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Ve
 }
 
 pub(crate) struct RenderConfig {
-    samples_per_pixel: usize,
-    resolution_y: usize,
-    scene_id: SceneId,
+    pub samples_per_pixel: usize,
+    pub resolution_y: usize,
+    pub scene: SceneData,
 }
 
 impl Default for RenderConfig {
     fn default() -> Self {
+        let scenes = load_scenes();
         Self {
-            samples_per_pixel: 50,
+            samples_per_pixel: 400,
             resolution_y: 300,
-            scene_id: SceneId::Int(0),
+            scene: scenes.into_iter().next().unwrap(),
         }
     }
 }
@@ -546,286 +549,296 @@ impl RenderConfig {
                     Some(int) => SceneId::Int(int),
                     None => SceneId::String(args.get(3)?.clone()),
                 };
+                let mut scenes = load_scenes().into_iter();
+                let scene: SceneData = match scene_id.clone() {
+                    SceneId::Int(i) => scenes.nth(i),
+                    SceneId::String(s) => scenes.find(|scene| scene.id == s.as_str()),
+                }
+                .unwrap_or_else(|| {
+                    // print_usage(&scenes);
+                    exit(1);
+                });
                 Some(RenderConfig {
                     samples_per_pixel: args.get(1)?.parse().ok()?,
                     resolution_y: args.get(2)?.parse().ok()?,
-                    scene_id,
+                    scene,
                 })
             }
             1 => Some(RenderConfig::default()),
             _ => None,
         };
     }
+}
 
-    fn default() -> Self {
-        Self {
-            samples_per_pixel: 4000,
-            resolution_y: 600,
-            scene_id: SceneId::Int(0),
+// fn print_usage(scenes: &Vec<SceneData>) {
+//     println!(
+//             "Run with:\ncargo run <samplesPerPixel = 4000> <y-resolution = 600> <scene = '{}'>\n\nScenes: {}",
+//             RenderConfig::default().scene.id,
+//             scenes.iter().enumerate().map(|(i, scene)| format!("{}: {}", i, scene.id)).collect::<Vec<_>>().join(", ")
+//         );
+// }
+
+fn print_progress(
+    processed_pixel_count: &atomic::AtomicUsize,
+    grid_size: usize,
+    time_start: Instant,
+) {
+    fn fmt(d: std::time::Duration) -> String {
+        let seconds = d.as_secs() % 60;
+        let minutes = (d.as_secs() / 60) % 60;
+        let hours = (d.as_secs() / 60) / 60;
+        if hours == 0 {
+            return format!("{}m:{:0>2}s", minutes, seconds);
         }
+        format!("{}:{:0>2}:{:0>2}", hours, minutes, seconds)
     }
+    let processed_percentage =
+        processed_pixel_count.load(atomic::Ordering::Relaxed) as f64 / (grid_size) as f64;
+    let elapsed = time_start.elapsed();
+    print!(
+        "\rRendering ... {:3.1}% ({} / {})",
+        100.0 * processed_percentage,
+        fmt(elapsed),
+        fmt(Duration::from_secs(
+            (elapsed.as_secs() as f64 * (1.0 / processed_percentage)) as u64
+        ))
+    );
+    std::io::stdout().flush().unwrap();
 }
 
-fn print_usage(scenes: &Vec<SceneData>) {
-    println!(
-            "Run with:\ncargo run <samplesPerPixel = 4000> <y-resolution = 600> <scene = '{}'>\n\nScenes: {}",
-            RenderConfig::default().scene_id,
-            scenes.iter().enumerate().map(|(i, scene)| format!("{}: {}", i, scene.id)).collect::<Vec<_>>().join(", ")
-        );
-}
-
-fn load_render_config_from_args(scenes: &Vec<SceneData>) -> RenderConfig {
-    let maybe_render_config = RenderConfig::from(std::env::args().collect());
-    match maybe_render_config {
-        None => {
-            print_usage(scenes);
-            exit(1);
-        }
-        Some(render_config) => {
-            return render_config;
-        }
-    }
-}
-
-pub struct RenderUpdate {
-    pub progress: f64,
+fn load_render_config_from_args() -> RenderConfig {
+    RenderConfig::from(std::env::args().collect()).unwrap()
 }
 
 #[derive(Debug, Clone)]
-pub struct RenderResult {
+pub struct RenderUpdate {
+    pub progress: f64,
+    pub image: Image,
+}
+
+#[derive(Debug, Clone)]
+pub struct Image {
     pub pixels: Vec<Vector>,
     pub resolution: (usize, usize),
 }
 
-pub fn render<T: Sink<RenderUpdate> + Clone + std::marker::Sync + std::marker::Unpin>(
+pub fn render(
     render_config: RenderConfig,
-    send_update_progress: T,
-) -> RenderResult {
-    let time_start = std::time::Instant::now();
+    send_update_progress: &(impl Sink<RenderUpdate, Error = SendError> + Unpin + Clone + Sync + Send),
+) -> Image {
+    let image = thread::scope(move |s| {
+        let resy = render_config.resolution_y;
+        let resx: usize = resy * 3 / 2;
 
-    let scenes = load_scenes();
+        let scene = render_config.scene;
+        let time_start = Instant::now();
+        let scene_objects = scene.objects.clone();
 
-    let scene: &SceneData = match render_config.scene_id.clone() {
-        SceneId::Int(i) => scenes.get(i),
-        SceneId::String(s) => scenes.iter().find(|scene| scene.id == s.as_str()),
-    }
-    .unwrap_or_else(|| {
-        print_usage(&scenes);
-        exit(1);
-    });
-    let scene_objects = &scene.objects;
+        //-- setup sensor
+        let sensor_origin: Vector = scene.camera.position;
+        let sensor_view_direction: Vector = scene.camera.direction.normalize();
+        let sensor_width: f64 = 0.036;
+        let sensor_height: f64 = sensor_width * 2.0 / 3.0;
+        let focal_length: f64 = scene.camera.focal_length;
+        // lens center (pinhole)
+        let lens_center = sensor_origin + sensor_view_direction * focal_length;
 
-    //-- setup sensor
-    let sensor_origin: Vector = scene.camera.position;
-    let sensor_view_direction: Vector = scene.camera.direction.normalize();
-    let sensor_width: f64 = 0.036;
-    let sensor_height: f64 = sensor_width * 2.0 / 3.0;
-    let focal_length: f64 = scene.camera.focal_length;
-    // lens center (pinhole)
-    let lens_center = sensor_origin + sensor_view_direction * focal_length;
-
-    //-- orthogonal axes spanning the sensor plane
-    let su: Vector = sensor_view_direction
-        .cross(&if sensor_view_direction.y.abs() < 0.9 {
-            Vector::from(0.0, 1.0, 0.0)
-        } else {
-            Vector::from(0.0, 0.0, 1.0)
-        })
-        .normalize();
-    let sv: Vector = su.cross(&sensor_view_direction);
-
-    let resy = render_config.resolution_y;
-    let resx: usize = resy * 3 / 2;
-    let grid_size = resx * resy;
-
-    println!(
-        "Scene {} ({} objects), {} samples per pixel, {}x{} resolution{}",
-        render_config.scene_id,
-        scene_objects.len(),
-        render_config.samples_per_pixel,
-        render_config.resolution_y * 3 / 2,
-        render_config.resolution_y,
-        if MOCK_RANDOM { " (mock random)" } else { "" }
-    );
-
-    let last_progress_print_time = atomic::AtomicU64::new(0);
-    let max_time_between_progress_prints = 1000;
-    let processed_pixel_count = atomic::AtomicUsize::new(0);
-
-    let print_progress = || {
-        fn fmt(d: std::time::Duration) -> String {
-            let seconds = d.as_secs() % 60;
-            let minutes = (d.as_secs() / 60) % 60;
-            let hours = (d.as_secs() / 60) / 60;
-            if hours == 0 {
-                return format!("{}m:{:0>2}s", minutes, seconds);
-            }
-            format!("{}:{:0>2}:{:0>2}", hours, minutes, seconds)
-        }
-        let processed_percentage =
-            processed_pixel_count.load(atomic::Ordering::Relaxed) as f64 / (grid_size) as f64;
-        let elapsed = time_start.elapsed();
-        print!(
-            "\rRendering ... {:3.1}% ({} / {})",
-            100.0 * processed_percentage,
-            fmt(elapsed),
-            fmt(Duration::from_secs(
-                (elapsed.as_secs() as f64 * (1.0 / processed_percentage)) as u64
-            ))
-        );
-        std::io::stdout().flush().unwrap();
-        last_progress_print_time.store(
-            time_start.elapsed().as_millis() as u64,
-            atomic::Ordering::Relaxed,
-        );
-    };
-
-    print_progress();
-
-    // Define a pure function for rendering a single pixel
-    let render_pixel = |pixel_index: usize| -> Vector {
-        let y = resy - 1 - pixel_index / resx;
-        let x = pixel_index % resx;
-
-        let mut radiance_v: Vector = Vector::zero();
-
-        for s in 0..render_config.samples_per_pixel {
-            // map to 2x2 subpixel rows and cols
-            let ysub: f64 = ((s / 2) % 2) as f64;
-            let xsub: f64 = (s % 2) as f64;
-
-            // sample sensor subpixel in [-1,1]
-            let r1: f64 = 2.0 * rand01();
-            let r2: f64 = 2.0 * rand01();
-            let xfilter: f64 = if r1 < 1.0 {
-                // TODO not sure what this is
-                r1.sqrt() - 1.0
+        //-- orthogonal axes spanning the sensor plane
+        let su: Vector = sensor_view_direction
+            .cross(&if sensor_view_direction.y.abs() < 0.9 {
+                Vector::from(0.0, 1.0, 0.0)
             } else {
-                1.0 - (2.0 - r1).sqrt()
-            };
-            let yfilter: f64 = if r2 < 1.0 {
-                r2.sqrt() - 1.0
-            } else {
-                1.0 - (2.0 - r2).sqrt()
-            };
+                Vector::from(0.0, 0.0, 1.0)
+            })
+            .normalize();
+        let sv: Vector = su.cross(&sensor_view_direction);
 
-            // x and y sample position on sensor plane
-            let sx: f64 =
-                ((x as f64 + 0.5 * (0.5 + xsub + xfilter)) / resx as f64 - 0.5) * sensor_width;
-            let sy: f64 =
-                ((y as f64 + 0.5 * (0.5 + ysub + yfilter)) / resy as f64 - 0.5) * sensor_height;
+        let grid_size = resx * resy;
 
-            // 3d sample position on sensor
-            let sensor_pos = sensor_origin + su * sx + sv * sy;
-            let ray_direction = (lens_center - sensor_pos).normalize();
-            // ray through pinhole
-            let ray = Ray {
-                origin: lens_center,
-                direction: ray_direction,
-            };
+        println!(
+            "Scene {} ({} objects), {} samples per pixel, {}x{} resolution{}",
+            scene.id,
+            scene_objects.len(),
+            render_config.samples_per_pixel,
+            render_config.resolution_y * 3 / 2,
+            render_config.resolution_y,
+            if MOCK_RANDOM { " (mock random)" } else { "" }
+        );
 
-            // evaluate radiance from this ray and accumulate
-            radiance_v = radiance_v + radiance(&ray, 0, &scene_objects);
-        }
-        // normalize radiance by number of samples
-        radiance_v = radiance_v / render_config.samples_per_pixel as f64;
-        processed_pixel_count.fetch_add(1, atomic::Ordering::Relaxed);
+        // let last_progress_print_time = atomic::AtomicU64::new(0);
+        // let max_time_between_progress_prints = 1000;
+        let processed_pixel_count = Arc::new(atomic::AtomicUsize::new(0));
+        let get_processed_pixel_count = processed_pixel_count.clone();
 
-        // Check progress periodically - no mutating state inside the pure function
-        if processed_pixel_count.load(atomic::Ordering::Relaxed) % 100 == 0
-            && last_progress_print_time.load(atomic::Ordering::Relaxed)
-                + max_time_between_progress_prints
-                < time_start.elapsed().as_millis() as u64
-        {
-            last_progress_print_time.store(
-                time_start.elapsed().as_millis() as u64,
-                atomic::Ordering::Relaxed,
-            );
-            let processed_percentage =
-                processed_pixel_count.load(atomic::Ordering::Relaxed) as f64 / (grid_size) as f64;
-            print_progress();
-            let _ = send_update_progress.clone().send(RenderUpdate {
+        // TODO use better concurrent vec
+        let pixels = Arc::new(std::sync::Mutex::new(vec![Vector::zero(); grid_size]));
+        let get_pixels = pixels.clone();
+
+        // Start thread that sends regular progress updates
+        let (stop_background_thread, should_stop) = mpsc::channel();
+        let resolution = (resx.clone(), resy.clone());
+        s.spawn(move || loop {
+            let mut send_update_progress = send_update_progress.clone();
+            let processed_percentage = get_processed_pixel_count.load(atomic::Ordering::Relaxed)
+                as f64
+                / (grid_size) as f64;
+            let _ = futures::executor::block_on(send_update_progress.send(RenderUpdate {
                 progress: processed_percentage,
-            });
-        }
+                image: Image {
+                    pixels: get_pixels.lock().unwrap().clone(),
+                    resolution,
+                },
+            }));
+            thread::sleep(Duration::from_millis(500));
+            if let Ok(_) = should_stop.try_recv() {
+                break;
+            }
+        });
 
-        Vector::from(
-            radiance_v.x.clamp(0.0, 1.0),
-            radiance_v.y.clamp(0.0, 1.0),
-            radiance_v.z.clamp(0.0, 1.0),
-        )
-    };
+        let render_thread_handle = s.spawn(move || {
+            // Pure function for rendering a single pixel
+            let render_pixel = |pixel_index: usize| -> Vector {
+                let y = resy - 1 - pixel_index / resx;
+                let x = pixel_index % resx;
 
-    let pixels: Vec<Vector> = if MOCK_RANDOM {
-        (0..grid_size).into_iter().map(render_pixel).collect()
-    } else {
-        // Use rayon to parallelize rendering
-        (0..grid_size).into_par_iter().map(render_pixel).collect()
-    };
+                let mut radiance_v: Vector = Vector::zero();
 
-    print_progress();
-    println!();
+                for s in 0..render_config.samples_per_pixel {
+                    // map to 2x2 subpixel rows and cols
+                    let ysub: f64 = ((s / 2) % 2) as f64;
+                    let xsub: f64 = (s % 2) as f64;
 
-    // Create directory if it does not exist
-    std::fs::create_dir_all("out").unwrap();
+                    // sample sensor subpixel in [-1,1]
+                    let r1: f64 = 2.0 * rand01();
+                    let r2: f64 = 2.0 * rand01();
+                    let xfilter: f64 = if r1 < 1.0 {
+                        // TODO not sure what this is
+                        r1.sqrt() - 1.0
+                    } else {
+                        1.0 - (2.0 - r1).sqrt()
+                    };
+                    let yfilter: f64 = if r2 < 1.0 {
+                        r2.sqrt() - 1.0
+                    } else {
+                        1.0 - (2.0 - r2).sqrt()
+                    };
 
-    // Write .ppm file
-    let path = format!(
-        "out/{}-scene-{}-spp{}-res{}-.ppm",
-        chrono::Local::now().format("%Y-%m-%d_%H:%M:%S").to_string(),
-        render_config.scene_id,
-        render_config.samples_per_pixel,
-        render_config.resolution_y,
-    );
-    let mut file = std::fs::File::create(path.clone()).unwrap();
-    file.write_all(b"P3\n").unwrap();
-    file.write_all(
-        format!(
-            "# samplesPerPixel: {}, resolution_y: {}, scene_id: {}\n",
-            render_config.samples_per_pixel, render_config.resolution_y, render_config.scene_id
-        )
-        .as_bytes(),
-    )
-    .unwrap();
-    file.write_all(
-        format!(
-            "# rendering time: {} s\n",
-            std::time::Instant::now()
-                .duration_since(time_start)
-                .as_secs()
-        )
-        .as_bytes(),
-    )
-    .unwrap();
-    file.write_all(format!("{} {}\n{}\n", resx, resy, 255).as_bytes())
-        .unwrap();
-    for pixel in pixels.iter().rev() {
-        file.write_all(
-            format!(
-                "{} {} {} ",
-                to_int_with_gamma_correction(pixel.x),
-                to_int_with_gamma_correction(pixel.y),
-                to_int_with_gamma_correction(pixel.z)
-            )
-            .as_bytes(),
-        )
-        .unwrap();
-    }
+                    // x and y sample position on sensor plane
+                    let sx: f64 = ((x as f64 + 0.5 * (0.5 + xsub + xfilter)) / resx as f64 - 0.5)
+                        * sensor_width;
+                    let sy: f64 = ((y as f64 + 0.5 * (0.5 + ysub + yfilter)) / resy as f64 - 0.5)
+                        * sensor_height;
 
-    // Create symlink for easy access to newest image
-    std::fs::remove_file("latest.ppm").unwrap_or_default();
-    match std::os::unix::fs::symlink(path.clone(), "latest.ppm") {
-        Ok(_) => (),
-        Err(_) => {
-            println!(
-                "Could not create symlink to latest image. You can find it at {}",
-                path
+                    // 3d sample position on sensor
+                    let sensor_pos = sensor_origin + su * sx + sv * sy;
+                    let ray_direction = (lens_center - sensor_pos).normalize();
+                    // ray through pinhole
+                    let ray = Ray {
+                        origin: lens_center,
+                        direction: ray_direction,
+                    };
+
+                    // evaluate radiance from this ray and accumulate
+                    radiance_v = radiance_v + radiance(&ray, 0, &scene_objects);
+                }
+                // normalize radiance by number of samples
+                radiance_v = radiance_v / render_config.samples_per_pixel as f64;
+                processed_pixel_count.fetch_add(1, atomic::Ordering::Relaxed);
+
+                Vector::from(
+                    radiance_v.x.clamp(0.0, 1.0),
+                    radiance_v.y.clamp(0.0, 1.0),
+                    radiance_v.z.clamp(0.0, 1.0),
+                )
+            };
+
+            let render_pixel_to_vec = |pixel_index: usize| {
+                let pixel_value = render_pixel(pixel_index);
+                let mut pixels = pixels.lock().unwrap();
+                pixels[pixel_index] = pixel_value;
+            };
+
+            if MOCK_RANDOM {
+                (0..grid_size).into_iter().for_each(render_pixel_to_vec);
+            } else {
+                // Use rayon to parallelize rendering
+                let mut indices: Vec<usize> = (0..grid_size).collect();
+                indices.shuffle(&mut rand::thread_rng());
+                indices.into_par_iter().for_each(render_pixel_to_vec);
+            };
+            let _ = stop_background_thread.send(());
+
+            // print_progress();
+            // println!();
+
+            // Create directory if it does not exist
+            std::fs::create_dir_all("out").unwrap();
+
+            // Write .ppm file
+            let path = format!(
+                "out/{}-scene-{}-spp{}-res{}-.ppm",
+                chrono::Local::now().format("%Y-%m-%d_%H:%M:%S").to_string(),
+                scene.id,
+                render_config.samples_per_pixel,
+                render_config.resolution_y,
             );
-        }
-    }
+            let mut file = std::fs::File::create(path.clone()).unwrap();
+            file.write_all(b"P3\n").unwrap();
+            file.write_all(
+                format!(
+                    "# samplesPerPixel: {}, resolution_y: {}, scene_id: {}\n",
+                    render_config.samples_per_pixel, render_config.resolution_y, scene.id
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            file.write_all(
+                format!(
+                    "# rendering time: {} s\n",
+                    std::time::Instant::now()
+                        .duration_since(time_start)
+                        .as_secs()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            file.write_all(format!("{} {}\n{}\n", resx, resy, 255).as_bytes())
+                .unwrap();
+            let pixels = pixels.lock().unwrap().to_vec();
+            for pixel in pixels.iter().rev() {
+                file.write_all(
+                    format!(
+                        "{} {} {} ",
+                        to_int_with_gamma_correction(pixel.x),
+                        to_int_with_gamma_correction(pixel.y),
+                        to_int_with_gamma_correction(pixel.z)
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            }
 
-    return RenderResult {
-        pixels,
-        resolution: (resx, resy),
-    };
+            // Create symlink for easy access to newest image
+            std::fs::remove_file("latest.ppm").unwrap_or_default();
+            match std::os::unix::fs::symlink(path.clone(), "latest.ppm") {
+                Ok(_) => (),
+                Err(_) => {
+                    println!(
+                        "Could not create symlink to latest image. You can find it at {}",
+                        path
+                    );
+                }
+            }
+
+            return Image {
+                pixels,
+                resolution: (resx, resy),
+            };
+        });
+
+        let image = render_thread_handle.join().unwrap();
+        return image;
+    });
+
+    return image;
 }
