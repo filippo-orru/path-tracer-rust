@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use iced::alignment::Horizontal;
 use iced::futures::channel::mpsc;
 use iced::futures::channel::oneshot;
@@ -196,35 +198,39 @@ fn view(state: &State) -> Element<'_, Message> {
             } else {
                 text("")
             },
-            match &state.rendering {
-                RenderState::NotRendering => container(text("")),
-                RenderState::Pending => container(text("")),
-                RenderState::Rendering { update } => container(
-                    canvas(CanvasState {
-                        image: &update.image,
-                    })
-                    .width(update.image.resolution.0 as f32)
-                    .height(update.image.resolution.1 as f32)
-                )
-                .padding(20),
+            {
+                let image = match &state.rendering {
+                    RenderState::NotRendering => None,
+                    RenderState::Pending => None,
+                    RenderState::Rendering { update } => Some(&update.image),
+                    RenderState::Done { result } => Some(result),
+                };
+                match image {
+                    None => container(text("")),
+                    Some(image) => {
+                        let (width, height) = image.resolution;
+                        // let aspect_ratio = width as f32 / height as f32;
 
-                RenderState::Done { result } => container(
-                    canvas(CanvasState { image: result })
-                        .width(result.resolution.0 as f32)
-                        .height(result.resolution.1 as f32)
-                )
-                .padding(20),
+                        // Use Length::Fill to allow container to expand, but keep aspect ratio
+                        container(
+                            canvas(CanvasState { image })
+                                .width(width as f32)
+                                .height(height as f32),
+                        )
+                        .padding(20)
+                    }
+                }
             },
             button("Render").on_press(Message::StartRender)
         ]
         .align_x(Horizontal::Center),
     )
+    .padding(20)
     .center(Length::Fill)
     .into()
 }
 
 // Canvas
-// First, we define the data we need for drawing
 #[derive(Debug)]
 struct CanvasState<'a> {
     image: &'a Image,
@@ -232,36 +238,57 @@ struct CanvasState<'a> {
 
 struct CanvasCache {
     cache: canvas::Cache,
-    last_hash: u64,
+    last_hash: RefCell<u64>,
 }
 
 impl Default for CanvasCache {
     fn default() -> Self {
         Self {
             cache: canvas::Cache::new(),
-            last_hash: 0,
+            last_hash: RefCell::new(0),
         }
     }
 }
 
-// Then, we implement the `Program` trait
 impl<Message> canvas::Program<Message> for CanvasState<'_> {
-    // No internal state
     type State = CanvasCache;
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: canvas::Event,
+        _bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> (canvas::event::Status, Option<Message>) {
+        match event {
+            canvas::Event::Mouse(_) => (),
+            canvas::Event::Touch(_) => (),
+            canvas::Event::Keyboard(_) => (),
+        }
+
+        (canvas::event::Status::Ignored, None)
+    }
 
     fn draw(
         &self,
-        _state: &CanvasCache,
+        state: &CanvasCache,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        // TODO Compute a hash of the image data to determine if it has changed
-        // let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        _state.cache.clear();
+        if self.image.hash != state.last_hash.borrow().clone() {
+            // println!(
+            //     "Canvas hash: {} != {}",
+            //     self.image.hash,
+            //     state.last_hash.borrow()
+            // );
+            *state.last_hash.borrow_mut() = self.image.hash;
+            state.cache.clear();
+            // println!("Canvas data changed, clearing cache");
+        }
 
-        let geometry = _state.cache.draw(renderer, bounds.size(), |frame| {
+        let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
             // background
             frame.fill_rectangle(
                 Point { x: 0.0, y: 0.0 },

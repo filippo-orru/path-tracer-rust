@@ -5,7 +5,9 @@ pub mod scenes;
 mod test;
 
 use std::{
+    collections::hash_map::DefaultHasher,
     fmt::Display,
+    hash::{Hash, Hasher},
     io::Write,
     ops::{Add, Div, Mul, Sub},
     process::exit,
@@ -620,6 +622,35 @@ pub struct RenderUpdate {
 pub struct Image {
     pub pixels: Vec<Vector>,
     pub resolution: (usize, usize),
+    pub hash: u64,
+}
+impl Image {
+    fn new(pixels: Vec<Vector>, resolution: (usize, usize)) -> Self {
+        Self {
+            hash: hash_vec_of_vectors(&pixels),
+            pixels,
+            resolution,
+        }
+    }
+}
+
+fn benchmark_function<T, F: FnOnce() -> T>(func: F) -> T {
+    let start = std::time::Instant::now();
+    let t = func();
+    println!("Elapsed time: {:.2?}", start.elapsed());
+    return t;
+}
+
+pub fn hash_vec_of_vectors(vectors: &[Vector]) -> u64 {
+    benchmark_function(|| {
+        let mut hasher = DefaultHasher::new();
+        for v in vectors {
+            v.x.to_bits().hash(&mut hasher);
+            v.y.to_bits().hash(&mut hasher);
+            v.z.to_bits().hash(&mut hasher);
+        }
+        hasher.finish()
+    })
 }
 
 pub fn render(
@@ -684,10 +715,7 @@ pub fn render(
                 / (grid_size) as f64;
             let _ = futures::executor::block_on(send_update_progress.send(RenderUpdate {
                 progress: processed_percentage,
-                image: Image {
-                    pixels: get_pixels.lock().unwrap().clone(),
-                    resolution,
-                },
+                image: Image::new(get_pixels.lock().unwrap().clone(), resolution),
             }));
             thread::sleep(Duration::from_millis(500));
             if let Ok(_) = should_stop.try_recv() {
@@ -830,10 +858,7 @@ pub fn render(
                 }
             }
 
-            return Image {
-                pixels,
-                resolution: (resx, resy),
-            };
+            return Image::new(pixels, (resx, resy));
         });
 
         let image = render_thread_handle.join().unwrap();
