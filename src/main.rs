@@ -8,6 +8,7 @@ use iced::futures::Stream;
 use iced::futures::StreamExt;
 use iced::stream::channel;
 use iced::widget::combo_box;
+use iced::widget::shader;
 use iced::widget::text_input;
 use iced::widget::{button, canvas, column, container, text};
 use iced::window::{Position, Settings};
@@ -22,8 +23,11 @@ use crate::render::Image;
 use crate::render::RenderConfig;
 use crate::render::RenderUpdate;
 use crate::render::SceneData;
+use crate::viewport::Controls;
+use crate::viewport::ViewportProgram;
 
 mod render;
+mod viewport;
 
 fn main() -> iced::Result {
     let application = application("A cool counter", update, view);
@@ -198,6 +202,12 @@ fn view(state: &State) -> Element<'_, Message> {
             } else {
                 text("")
             },
+            shader(ViewportProgram {
+                // scene: state.config.scene.clone(),
+                controls: Controls::default()
+            })
+            .width(400)
+            .height(400),
             {
                 let image = match &state.rendering {
                     RenderState::NotRendering => None,
