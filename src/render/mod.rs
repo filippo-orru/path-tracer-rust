@@ -189,8 +189,8 @@ struct Material {
 #[derive(Clone, Debug)]
 pub struct SceneData {
     pub id: String,
-    objects: Vec<SceneObjectData>,
-    camera: CameraData,
+    pub objects: Vec<SceneObjectData>,
+    pub camera: CameraData,
 }
 
 #[derive(Clone, Copy, Debug)]
