@@ -1,8 +1,60 @@
 use glam::Vec3;
 
+use crate::render::{Mesh, Triangle};
+
 use super::{
     load_off::load_off, CameraData, Material, ReflectType, SceneData, SceneObject, SceneObjectData,
 };
+
+// Helper function to create a quad (rectangle) from two triangles
+fn single_quad_mesh(size: f32, axis: usize, flip: bool) -> Mesh {
+    // Create a quad along the specified axis (0=X, 1=Y, 2=Z)
+    // with the normal pointing in the positive direction
+    // flip=true will make normal point in negative direction
+
+    let half_size = size / 2.0;
+    let mut vertices = Vec::with_capacity(4);
+
+    for i in 0..2 {
+        for j in 0..2 {
+            let mut pos = [0.0, 0.0, 0.0];
+            let idx1 = (axis + 1) % 3;
+            let idx2 = (axis + 2) % 3;
+            pos[idx1] = if i == 0 { -half_size } else { half_size };
+            pos[idx2] = if j == 0 { -half_size } else { half_size };
+
+            vertices.push(Vec3::new(pos[0], pos[1], pos[2]));
+        }
+    }
+
+    // Create two triangles from the four vertices
+    let mut triangles = Vec::with_capacity(2);
+    if flip {
+        triangles.push(Triangle {
+            a: vertices[0],
+            b: vertices[1],
+            c: vertices[2],
+        });
+        triangles.push(Triangle {
+            a: vertices[2],
+            b: vertices[1],
+            c: vertices[3],
+        });
+    } else {
+        triangles.push(Triangle {
+            a: vertices[0],
+            b: vertices[2],
+            c: vertices[1],
+        });
+        triangles.push(Triangle {
+            a: vertices[1],
+            b: vertices[2],
+            c: vertices[3],
+        });
+    }
+
+    Mesh::new(triangles)
+}
 
 pub fn load_scenes() -> Vec<SceneData> {
     // Set up scene
@@ -12,62 +64,64 @@ pub fn load_scenes() -> Vec<SceneData> {
         z: 2.8,
     };
 
+    const WALL_SIZE: f32 = 15.0; // Size of the quad walls
+
     let cornell_box = vec![
         // Cornell Box centered in the origin (0, 0, 0)
-        // Left
+        // Left wall - Red
         SceneObjectData {
-            position: Vec3::new(-1e5 - BOX_DIMENSIONS.x, 0.0, 0.0),
-            type_: SceneObject::Sphere { radius: 1e5 },
+            position: Vec3::new(-BOX_DIMENSIONS.x, 0.0, 0.0),
+            type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 0, false)),
             material: Material {
                 color: Vec3::new(0.85, 0.25, 0.25),
                 emmission: Vec3::default(),
                 reflect_type: ReflectType::Diffuse,
             },
         },
-        // Right
+        // Right wall - Blue
         SceneObjectData {
-            position: Vec3::new(1e5 + BOX_DIMENSIONS.x, 0.0, 0.0),
-            type_: SceneObject::Sphere { radius: 1e5 },
+            position: Vec3::new(BOX_DIMENSIONS.x, 0.0, 0.0),
+            type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 0, true)),
             material: Material {
                 color: Vec3::new(0.25, 0.35, 0.85),
                 emmission: Vec3::default(),
                 reflect_type: ReflectType::Diffuse,
             },
         },
-        // Top
+        // Top wall - White
         SceneObjectData {
-            position: Vec3::new(0.0, 1e5 + BOX_DIMENSIONS.y, 0.0),
-            type_: SceneObject::Sphere { radius: 1e5 },
+            position: Vec3::new(0.0, BOX_DIMENSIONS.y, 0.0),
+            type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 1, true)),
             material: Material {
                 color: Vec3::new(0.75, 0.75, 0.75),
                 emmission: Vec3::default(),
                 reflect_type: ReflectType::Diffuse,
             },
         },
-        // Bottom
+        // Bottom wall - White
         SceneObjectData {
-            position: Vec3::new(0.0, -1e5 - BOX_DIMENSIONS.y, 0.0),
-            type_: SceneObject::Sphere { radius: 1e5 },
+            position: Vec3::new(0.0, -BOX_DIMENSIONS.y, 0.0),
+            type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 1, false)),
             material: Material {
                 color: Vec3::new(0.75, 0.75, 0.75),
                 emmission: Vec3::default(),
                 reflect_type: ReflectType::Diffuse,
             },
         },
-        // Back
+        // Back wall - White
         SceneObjectData {
-            position: Vec3::new(0.0, 0.0, -1e5 - BOX_DIMENSIONS.z),
-            type_: SceneObject::Sphere { radius: 1e5 },
+            position: Vec3::new(0.0, 0.0, -BOX_DIMENSIONS.z),
+            type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 2, false)),
             material: Material {
                 color: Vec3::new(0.75, 0.75, 0.75),
                 emmission: Vec3::default(),
                 reflect_type: ReflectType::Diffuse,
             },
         },
-        // Front
+        // Front wall - Invisible/Black
         SceneObjectData {
-            position: Vec3::new(0.0, 0.0, 1e5 + 3.0 * BOX_DIMENSIONS.z - 0.5),
-            type_: SceneObject::Sphere { radius: 1e5 },
+            position: Vec3::new(0.0, 0.0, 3.0 * BOX_DIMENSIONS.z - 0.5),
+            type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 2, true)),
             material: Material {
                 color: Vec3::default(),
                 emmission: Vec3::default(),
@@ -79,8 +133,7 @@ pub fn load_scenes() -> Vec<SceneData> {
             position: Vec3::new(0.0, BOX_DIMENSIONS.y + 10.0 - 0.04, 0.0),
             type_: SceneObject::Sphere { radius: 10.0 },
             material: Material {
-                color: Vec3::default(),
-                // emmission: Vector::from(0.98 * 2.0, 2.0, 0.9 * 2.0),
+                color: Vec3::new(0.98, 1.0, 0.9),
                 emmission: Vec3::new(0.98, 1.0, 0.9) * 15.0,
                 reflect_type: ReflectType::Diffuse,
             },

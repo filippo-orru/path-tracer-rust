@@ -32,7 +32,7 @@ mod viewport;
 fn main() -> iced::Result {
     let application = application("A cool counter", update, view);
     let settings = Settings {
-        size: Size::new(600.0, 1027.0),
+        size: Size::new(950.0, 1027.0),
         position: Position::SpecificWith(|window, display| Point {
             x: display.width - window.width,
             y: 0.0,
@@ -59,6 +59,7 @@ struct State {
     config_has_error: Option<String>,
 
     rendering: RenderState,
+    empty_image: Image,
 }
 
 impl Default for State {
@@ -89,6 +90,11 @@ impl Default for State {
             samples_per_pixel: "100".to_owned(),
             config_has_error: None,
             rendering: RenderState::NotRendering,
+            empty_image: Image {
+                pixels: vec![],
+                resolution: (0, 0),
+                hash: 0,
+            },
         }
     }
 }
@@ -187,44 +193,41 @@ fn create_render_config(state: &State, spp: usize, res_y: usize) -> RenderConfig
 fn view(state: &State) -> Element<'_, Message> {
     return container(
         column![
-            text(match &state.rendering {
-                RenderState::NotRendering => "Not rendering".to_owned(),
-                RenderState::Pending => "Pending...".to_owned(),
-                RenderState::Rendering { update } =>
-                    format!("Rendering... {:.2}%", update.progress * 100.0),
-                RenderState::Done { result } => format!(
-                    "Render done! ({}x{})",
-                    result.resolution.0, result.resolution.1
-                ),
-            }),
             column![
-                container(
-                    combo_box(
-                        &state.scene_ids_selector,
-                        "Select scene",
-                        Some(&state.selected_scene_id),
-                        Message::SelectScene
-                    )
-                    .width(250)
-                )
-                .padding(10)
-                .center_x(Length::Shrink),
-                text("Resolution Y"),
-                container(
-                    text_input("Resolution Y", &state.resolution_y.to_string())
-                        .on_input(Message::UpdateResolutionY)
-                        .width(250)
-                )
-                .padding(10)
-                .center_x(Length::Shrink),
-                text("Samples per pixel"),
-                container(
-                    text_input("Samples per pixel", &state.samples_per_pixel.to_string())
-                        .on_input(Message::UpdateSamplesPerPixel)
-                        .width(250)
-                )
-                .padding(10)
-                .center_x(Length::Shrink),
+                row![
+                    column![
+                        text("Scene"),
+                        container(
+                            combo_box(
+                                &state.scene_ids_selector,
+                                "Select scene",
+                                Some(&state.selected_scene_id),
+                                Message::SelectScene
+                            )
+                            .width(250)
+                        )
+                    ]
+                    .spacing(2),
+                    column![
+                        text("Resolution Y"),
+                        container(
+                            text_input("Resolution Y", &state.resolution_y.to_string())
+                                .on_input(Message::UpdateResolutionY)
+                                .width(250)
+                        )
+                    ]
+                    .spacing(2),
+                    column![
+                        text("Samples per pixel"),
+                        container(
+                            text_input("Samples per pixel", &state.samples_per_pixel.to_string())
+                                .on_input(Message::UpdateSamplesPerPixel)
+                                .width(250)
+                        )
+                    ]
+                    .spacing(2),
+                ]
+                .spacing(10),
                 if let Some(err) = &state.config_has_error {
                     text(err).color(Color::from_rgb(1.0, 0.0, 0.0))
                 } else {
@@ -232,42 +235,56 @@ fn view(state: &State) -> Element<'_, Message> {
                 },
             ]
             .spacing(10),
+            shader(ViewportProgram {
+                config: create_render_config(&state, 1, 1),
+                // controls: Controls::default()
+            })
+            .width(500)
+            .height(300),
             {
                 let image = match &state.rendering {
-                    RenderState::NotRendering => None,
-                    RenderState::Pending => None,
-                    RenderState::Rendering { update } => Some(&update.image),
-                    RenderState::Done { result } => Some(result),
+                    RenderState::NotRendering | RenderState::Pending => &state.empty_image,
+                    RenderState::Rendering { update } => &update.image,
+                    RenderState::Done { result } => &result,
                 };
-                match image {
-                    None => container(
-                        shader(ViewportProgram {
-                            config: create_render_config(&state, 1, 1),
-                            // controls: Controls::default()
-                        })
-                        .width(400)
-                        .height(400),
-                    ),
-                    Some(image) => {
-                        let (width, height) = image.resolution;
-                        // let aspect_ratio = width as f32 / height as f32;
-
-                        // Use Length::Fill to allow container to expand, but keep aspect ratio
-                        container(
-                            canvas(CanvasState { image })
-                                .width(width as f32)
-                                .height(height as f32),
-                        )
-                        .padding(20)
-                    }
-                }
+                // let (width, height) = image.resolution;
+                // let aspect_ratio = width as f32 / height as f32;
+                container(
+                    canvas(CanvasState { image }).width(500).height(300),
+                    // .width(width as f32)
+                    // .height(height as f32),
+                )
             },
             row![
-                button("Clear").on_press(Message::ClearRender),
-                button("Render").on_press(Message::StartRender),
+                button("Clear").on_press_maybe(match &state.rendering {
+                    RenderState::NotRendering
+                    | RenderState::Pending
+                    | RenderState::Rendering { update: _ } => None,
+                    RenderState::Done { result: _ } => Some(Message::ClearRender),
+                }),
+                button(text(match &state.rendering {
+                    RenderState::NotRendering | RenderState::Done { result: _ } =>
+                        "Render".to_owned(),
+                    RenderState::Pending | RenderState::Rendering { update: _ } =>
+                        "Rendering...".to_owned(),
+                }))
+                .on_press_maybe(match &state.rendering {
+                    RenderState::NotRendering | RenderState::Done { result: _ } =>
+                        Some(Message::StartRender),
+                    RenderState::Pending | RenderState::Rendering { update: _ } => None,
+                }),
+                text(match &state.rendering {
+                    RenderState::NotRendering => "".to_owned(),
+                    RenderState::Pending => "...".to_owned(),
+                    RenderState::Rendering { update } => format!("{:.2}%", update.progress * 100.0),
+                    RenderState::Done { result } =>
+                        format!("Done! ({}x{})", result.resolution.0, result.resolution.1),
+                }),
             ]
+            .align_y(iced::Alignment::Center)
             .spacing(10),
         ]
+        .spacing(10)
         .align_x(Horizontal::Center),
     )
     .padding(20)

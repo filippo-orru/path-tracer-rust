@@ -89,6 +89,7 @@ impl Primitive for ViewportPrimitive {
         let sensor_origin: Vec3 = self.camera.position;
         let sensor_view_direction: Vec3 = self.camera.direction.normalize();
         let sensor_width: f32 = self.camera.sensor_width;
+        let sensor_height: f32 = self.camera.sensor_height;
         let focal_length: f32 = self.camera.focal_length;
         // lens center (pinhole)
         let lens_center = sensor_origin + sensor_view_direction * focal_length;
@@ -332,9 +333,7 @@ impl FragmentShaderPipeline {
 }
 
 #[derive(Default)]
-pub struct ViewportState {
-    pub offset: Vec2,
-}
+pub struct ViewportState {}
 
 impl<Message> shader::Program<Message> for ViewportProgram {
     type State = ViewportState;
