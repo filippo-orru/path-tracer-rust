@@ -91,6 +91,19 @@ pub struct CameraData {
     pub direction: Vec3,
     /// in meters
     pub focal_length: f32,
+    /// in meters
+    pub sensor_width: f32,
+}
+
+impl CameraData {
+    fn new(position: Vec3, direction: Vec3) -> Self {
+        Self {
+            position,
+            direction,
+            focal_length: 0.035,
+            sensor_width: 0.036,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -159,7 +172,7 @@ impl SceneObjectData {
         };
     }
 
-    pub fn to_triangles(&self) -> &[Triangle] {
+    pub fn to_triangles(&self) -> Vec<Triangle> {
         return self.type_.to_triangles();
     }
 }
@@ -171,12 +184,72 @@ pub(crate) enum SceneObject {
 }
 
 impl SceneObject {
-    fn to_triangles(&self) -> &[Triangle] {
+    fn to_triangles(&self) -> Vec<Triangle> {
         match self {
-            SceneObject::Sphere { .. } => &[],
-            SceneObject::Mesh(mesh) => &mesh.triangles,
+            SceneObject::Sphere { radius } => sphere_to_triangles(*radius),
+            SceneObject::Mesh(mesh) => mesh.triangles.clone(),
         }
     }
+}
+
+fn sphere_to_triangles(radius: f32) -> Vec<Triangle> {
+    let mut triangles: Vec<Triangle> = vec![];
+    let steps = 10;
+    for i in 0..steps {
+        let theta1 = PI * (i as f32) / (steps as f32);
+        let theta2 = PI * ((i + 1) as f32) / (steps as f32);
+        for j in 0..(steps * 2) {
+            let phi1 = 2.0 * PI * (j as f32) / ((steps * 2) as f32);
+            let phi2 = 2.0 * PI * ((j + 1) as f32) / ((steps * 2) as f32);
+
+            let p1 = Vec3::new(
+                radius * theta1.sin() * phi1.cos(),
+                radius * theta1.cos(),
+                radius * theta1.sin() * phi1.sin(),
+            );
+            let p2 = Vec3::new(
+                radius * theta2.sin() * phi1.cos(),
+                radius * theta2.cos(),
+                radius * theta2.sin() * phi1.sin(),
+            );
+            let p3 = Vec3::new(
+                radius * theta2.sin() * phi2.cos(),
+                radius * theta2.cos(),
+                radius * theta2.sin() * phi2.sin(),
+            );
+            let p4 = Vec3::new(
+                radius * theta1.sin() * phi2.cos(),
+                radius * theta1.cos(),
+                radius * theta1.sin() * phi2.sin(),
+            );
+
+            if i == 0 {
+                triangles.push(Triangle {
+                    a: p1,
+                    b: p3,
+                    c: p4,
+                });
+            } else if i + 1 == steps {
+                triangles.push(Triangle {
+                    a: p1,
+                    b: p2,
+                    c: p3,
+                });
+            } else {
+                triangles.push(Triangle {
+                    a: p1,
+                    b: p2,
+                    c: p4,
+                });
+                triangles.push(Triangle {
+                    a: p2,
+                    b: p3,
+                    c: p4,
+                });
+            }
+        }
+    }
+    return triangles;
 }
 
 #[derive(Clone, Debug)]
@@ -227,7 +300,7 @@ pub struct Triangle {
 }
 
 impl Triangle {
-    fn transformed(&self, v: &Vec3) -> Triangle {
+    pub fn transformed(&self, v: &Vec3) -> Triangle {
         Triangle {
             a: self.a + *v,
             b: self.b + *v,
@@ -572,7 +645,7 @@ pub fn render(
         //-- setup sensor
         let sensor_origin: Vec3 = scene.camera.position;
         let sensor_view_direction: Vec3 = scene.camera.direction.normalize();
-        let sensor_width: f32 = 0.036;
+        let sensor_width: f32 = scene.camera.sensor_width;
         let sensor_height: f32 = sensor_width * 2.0 / 3.0;
         let focal_length: f32 = scene.camera.focal_length;
         // lens center (pinhole)

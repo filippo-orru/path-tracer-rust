@@ -87,11 +87,10 @@ pub fn load_scenes() -> Vec<SceneData> {
         },
     ];
 
-    let default_camera = CameraData {
-        position: Vec3::new(0.0, 0.26 * BOX_DIMENSIONS.y, 3.0 * BOX_DIMENSIONS.z - 1.0),
-        direction: Vec3::new(0.0, -0.06, -1.0),
-        focal_length: 0.035,
-    };
+    let default_camera = CameraData::new(
+        Vec3::new(0.0, 0.26 * BOX_DIMENSIONS.y, 3.0 * BOX_DIMENSIONS.z - 1.0),
+        Vec3::new(0.0, -0.06, -1.0),
+    );
 
     // scene_id to scene_objects
     return vec![
@@ -209,11 +208,10 @@ pub fn load_scenes() -> Vec<SceneData> {
             .into_iter()
             .chain(cornell_box.clone())
             .collect(),
-            camera: CameraData {
-                position: Vec3::new(0.9, 0.26 * BOX_DIMENSIONS.y, 3.0 * BOX_DIMENSIONS.z - 1.0),
-                direction: Vec3::new(-0.09, -0.06, -1.0),
-                focal_length: 0.035,
-            },
+            camera: CameraData::new(
+                Vec3::new(0.9, 0.26 * BOX_DIMENSIONS.y, 3.0 * BOX_DIMENSIONS.z - 1.0),
+                Vec3::new(-0.09, -0.06, -1.0),
+            ),
         },
     ];
 }

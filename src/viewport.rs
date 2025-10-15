@@ -2,7 +2,11 @@ use glam::{Mat4, Vec2, Vec3};
 use iced::{
     advanced::Shell,
     event, mouse,
-    widget::shader::{self, wgpu, Primitive},
+    widget::shader::{
+        self,
+        wgpu::{self},
+        Primitive,
+    },
     Rectangle,
 };
 
@@ -23,15 +27,15 @@ impl ViewportPrimitive {
     fn get_vertex_buffer(&self) -> Vec<f32> {
         let mut verts = Vec::with_capacity(self.triangles.len() * 3 * (2 + 4)); // pos + color
 
-        fn add_vert(verts: &mut Vec<f32>, position: Vec3, color: [f32; 3]) {
-            verts.extend_from_slice(&[position.x, position.y, position.z, 1.0]);
-            verts.extend_from_slice(&color);
-            verts.push(1.0);
-        }
-
         for triangle in self.triangles.iter() {
-            for vertex in &[triangle.tri.a, triangle.tri.b, triangle.tri.c] {
-                add_vert(&mut verts, *vertex, triangle.color.to_array());
+            for position in &[triangle.tri.a, triangle.tri.b, triangle.tri.c] {
+                {
+                    let color = triangle.color.to_array();
+                    verts.extend_from_slice(&position.to_array());
+                    verts.push(1.0);
+                    verts.extend_from_slice(&color);
+                    verts.push(1.0);
+                };
             }
         }
 
@@ -48,8 +52,8 @@ pub struct TriangleWithColor {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct Uniforms {
-    projection: [f32; 4 * 4],
-    padding: [f32; 80 - (4 * 4 * 4)], // Need min. 80 bytes for uniforms, idk why
+    view_proj: [f32; 4 * 4],
+    padding: [f32; 80], // Uniforms need to be min. 80 bytes, idk why
 }
 
 impl Primitive for ViewportPrimitive {
@@ -60,32 +64,64 @@ impl Primitive for ViewportPrimitive {
         format: shader::wgpu::TextureFormat,
         storage: &mut shader::Storage,
         target_size: &iced::Rectangle,
-        _viewport: &shader::Viewport,
+        viewport: &shader::Viewport,
     ) {
+        // Check if viewport size changed
         if !storage.has::<FragmentShaderPipeline>() {
-            storage.store(FragmentShaderPipeline::new(device, format));
+            storage.store(FragmentShaderPipeline::new(device, format, viewport));
         }
 
         let pipeline = storage.get_mut::<FragmentShaderPipeline>().unwrap();
+        if pipeline.viewport.physical_height() != viewport.physical_height()
+            || pipeline.viewport.physical_width() != viewport.physical_width()
+        {
+            // println!(
+            //     "Viewport size changed: {:?} -> {:?}",
+            //     pipeline.viewport, viewport
+            // );
+            *pipeline = FragmentShaderPipeline::new(device, format, viewport);
+        }
 
         // println!("Target size: {:?}", target_size);
 
-        let fov = self.camera.focal_length * 40.0; // rough approximation for 35mm sensor
+        // Create view matrix from camera
+
+        let sensor_origin: Vec3 = self.camera.position;
+        let sensor_view_direction: Vec3 = self.camera.direction.normalize();
+        let sensor_width: f32 = self.camera.sensor_width;
+        let focal_length: f32 = self.camera.focal_length;
+        // lens center (pinhole)
+        let lens_center = sensor_origin + sensor_view_direction * focal_length;
+
+        // Create a "look-at" target point from the camera position and direction
+        let target = lens_center + sensor_view_direction;
+
+        // Assuming Y is up in your world space
+        let up = Vec3::new(0.0, 1.0, 0.0);
+
+        // Create view matrix
+        let view = Mat4::look_at_rh(sensor_origin, target, up);
+        let fov = 2.0 * (sensor_width / (2.0 * focal_length)).atan();
+
+        let aspect_ratio = target_size.width / target_size.height;
+        // Using right-handed coordinate system for consistency
+        let projection = Mat4::perspective_rh(fov, aspect_ratio, 0.001, 1000.0);
+
+        // Combine view and projection matrices
+        let view_proj = projection * view;
+
+        // Debug output to help diagnose any remaining issues
+        // println!("Camera pos: {:?}, dir: {:?}", camera_pos, camera_dir);
+        // println!("FOV: {} degrees", fov_y.to_degrees());
+        // println!("View matrix: {:?}", view);
+        // println!("Projection: {:?}", projection);
+        // println!("View-proj: {:?}", view_proj);
 
         pipeline.update(
             queue,
             &Uniforms {
-                projection: Mat4::perspective_lh(
-                    fov.to_radians(),
-                    target_size.width / target_size.height,
-                    0.001,
-                    1000.0,
-                )
-                .to_cols_array(),
-                // center: self.controls.center,
-                // scale: self.controls.scale(),
-                // max_iter: self.controls.max_iter,
-                padding: [0.0; 80 - (4 * 4 * 4)],
+                view_proj: view_proj.to_cols_array(),
+                padding: [0.0; 80],
             },
             &self.get_vertex_buffer(),
             self.triangles.len() as u32 * 3,
@@ -112,10 +148,34 @@ struct FragmentShaderPipeline {
     uniform_bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     verts_count: u32,
+    depth_texture_view: wgpu::TextureView,
+    viewport: shader::Viewport,
 }
 impl FragmentShaderPipeline {
-    fn new(device: &shader::wgpu::Device, format: shader::wgpu::TextureFormat) -> Self {
+    fn new(
+        device: &shader::wgpu::Device,
+        format: shader::wgpu::TextureFormat,
+        viewport: &shader::Viewport,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let size = wgpu::Extent3d {
+            width: viewport.physical_width(),
+            height: viewport.physical_height(),
+            depth_or_array_layers: 1,
+        };
+        let desc = wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        };
+        let texture = device.create_texture(&desc);
+
+        let depth_texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let vertex_attributes = [
             wgpu::VertexAttribute {
@@ -148,7 +208,13 @@ impl FragmentShaderPipeline {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -162,11 +228,9 @@ impl FragmentShaderPipeline {
             multiview: None,
         });
 
-        let size = std::mem::size_of::<Uniforms>() as u64;
-        println!("Uniforms size: {}", size);
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shader_quad uniform buffer"),
-            size: size,
+            size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -183,7 +247,7 @@ impl FragmentShaderPipeline {
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shader_quad vertex buffer"),
-            size: std::mem::size_of::<[f32; 4 * 2]>() as u64 * 1024 * 4, // 4k vertices with pos+color
+            size: std::mem::size_of::<[f32; 4 * 2]>() as u64 * 1024 * 4 * 10, // 40k vertices with pos+color
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -194,6 +258,8 @@ impl FragmentShaderPipeline {
             uniform_bind_group,
             vertex_buffer,
             verts_count: 0,
+            depth_texture_view,
+            viewport: viewport.clone(),
         }
     }
 
@@ -226,7 +292,14 @@ impl FragmentShaderPipeline {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_texture_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
         });
@@ -242,6 +315,15 @@ impl FragmentShaderPipeline {
             0.0,
             1.0,
         );
+        // Clear the viewport with a blue color
+        pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
+        let blue = wgpu::Color {
+            r: 0.0,
+            g: 0.1,
+            b: 0.2,
+            a: 1.0,
+        };
+        pass.set_blend_constant(blue);
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
@@ -276,7 +358,7 @@ impl<Message> shader::Program<Message> for ViewportProgram {
                         .to_triangles()
                         .into_iter()
                         .map(|tri| TriangleWithColor {
-                            tri: tri.clone(), // TODO avoid clone
+                            tri: tri.transformed(&object.position),
                             color: object.material.color,
                         })
                 })

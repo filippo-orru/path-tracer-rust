@@ -14,7 +14,6 @@ use iced::widget::text_input;
 use iced::widget::{button, canvas, column, container, text};
 use iced::window::{Position, Settings};
 use iced::Length;
-use iced::Length::Fill;
 use iced::{application, Color, Element, Point, Size, Subscription};
 use iced::{mouse, Rectangle, Renderer, Theme};
 
@@ -87,7 +86,7 @@ impl Default for State {
             selected_scene: mesh.clone(),
             scenes,
             resolution_y: "300".to_owned(),
-            samples_per_pixel: "1000".to_owned(),
+            samples_per_pixel: "100".to_owned(),
             config_has_error: None,
             rendering: RenderState::NotRendering,
         }
@@ -162,7 +161,16 @@ fn update(state: &mut State, message: Message) {
         Message::RenderingProgress(update) => {
             state.rendering = RenderState::Rendering { update };
         }
-        Message::SelectScene(id) => state.selected_scene_id = id,
+        Message::SelectScene(id) => {
+            state.selected_scene_id = id;
+            if let Some(scene) = state
+                .scenes
+                .iter()
+                .find(|s| s.borrow().id == state.selected_scene_id)
+            {
+                state.selected_scene = scene.clone();
+            }
+        }
         Message::UpdateResolutionY(value) => state.resolution_y = value,
         Message::UpdateSamplesPerPixel(value) => state.samples_per_pixel = value,
     }
@@ -339,7 +347,7 @@ impl<Message> canvas::Program<Message> for CanvasState<'_> {
 
             for y in 0..resy {
                 for x in 0..resx {
-                    let color = self.image.pixels[(resy - y - 1) * resx + x];
+                    let color = self.image.pixels[(resy - y) * resx - x - 1];
                     let red = gamma_correction(color.x);
                     let green = gamma_correction(color.y);
                     let blue = gamma_correction(color.z);
@@ -402,6 +410,6 @@ fn render_worker() -> impl Stream<Item = Message> {
     })
 }
 
-fn subscription(state: &State) -> Subscription<Message> {
+fn subscription(_state: &State) -> Subscription<Message> {
     Subscription::run(render_worker)
 }
