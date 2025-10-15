@@ -5,18 +5,27 @@ pub mod scenes;
 mod test;
 
 use std::{
+    borrow::Cow,
     collections::hash_map::DefaultHasher,
     fmt::Display,
     hash::{Hash, Hasher},
     io::Write,
     process::exit,
-    sync::{Arc, atomic, mpsc},
+    sync::{
+        Arc,
+        atomic::{self, AtomicBool},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
 
+use async_std::task;
 use glam::Vec3;
-use iced::futures::{self, Sink, SinkExt, channel::mpsc::SendError};
+use iced::futures::{
+    self, Sink, SinkExt,
+    channel::{mpsc::SendError, oneshot},
+};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use scenes::load_scenes;
@@ -806,7 +815,10 @@ pub fn hash_vec_of_vectors(vectors: &[Vec3]) -> u64 {
 
 pub fn render(
     render_config: RenderConfig,
-    send_update_progress: &(impl Sink<RenderUpdate, Error = SendError> + Unpin + Clone + Sync + Send),
+    send_update_progress: &mut (
+             impl Sink<RenderUpdate, Error = SendError> + Unpin + Clone + Sync + Send
+         ),
+    stop_receiver: oneshot::Receiver<()>,
 ) -> Image {
     let image = thread::scope(move |s| {
         let resy = render_config.resolution_y;
@@ -842,12 +854,30 @@ pub fn render(
         let pixels = Arc::new(std::sync::Mutex::new(vec![Vec3::default(); grid_size]));
         let get_pixels = pixels.clone();
 
-        // Start thread that sends regular progress updates
-        let (stop_background_thread, should_stop) = mpsc::channel();
+        let stop_render = Arc::new(AtomicBool::new(false));
+
         let resolution = (resx.clone(), resy.clone());
+
+        // Start background thread that listens for stop signal
+        let store_stop_render = stop_render.clone();
+        s.spawn(move || {
+            futures::executor::block_on(async {
+                if let Ok(_) = stop_receiver.await {
+                    println!("Received stop signal");
+                    store_stop_render.store(true, atomic::Ordering::Relaxed);
+                }
+            });
+        });
+
+        // Start background thread that sends regular progress updates
+        let background_stop_render = stop_render.clone();
         s.spawn(move || {
             loop {
-                let mut send_update_progress = send_update_progress.clone();
+                if background_stop_render.load(atomic::Ordering::Relaxed) == true {
+                    println!("Stopping background thread");
+                    break;
+                }
+
                 let processed_percentage = get_processed_pixel_count.load(atomic::Ordering::Relaxed)
                     as f64
                     / (grid_size) as f64;
@@ -855,10 +885,8 @@ pub fn render(
                     progress: processed_percentage,
                     image: Image::new(get_pixels.lock().unwrap().clone(), resolution),
                 }));
-                thread::sleep(Duration::from_millis(500));
-                if let Ok(_) = should_stop.try_recv() {
-                    break;
-                }
+
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
         });
 
@@ -918,6 +946,10 @@ pub fn render(
             };
 
             let render_pixel_to_vec = |pixel_index: usize| {
+                let stop_render = stop_render.clone();
+                if stop_render.load(atomic::Ordering::Relaxed) == true {
+                    return;
+                }
                 let pixel_value = render_pixel(pixel_index);
                 let mut pixels = pixels.lock().unwrap();
                 pixels[pixel_index] = pixel_value;
@@ -931,7 +963,7 @@ pub fn render(
                 indices.shuffle(&mut rand::thread_rng());
                 indices.into_par_iter().for_each(render_pixel_to_vec);
             };
-            let _ = stop_background_thread.send(());
+            stop_render.store(true, atomic::Ordering::Relaxed);
 
             // print_progress();
             // println!();

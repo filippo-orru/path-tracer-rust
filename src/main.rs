@@ -1,12 +1,17 @@
+use async_std::task;
+use iced::futures::future::JoinAll;
 use std::cell::RefCell;
+use std::thread;
 
 use iced::Length;
 use iced::alignment::Horizontal;
+use iced::futures;
 use iced::futures::SinkExt;
 use iced::futures::Stream;
 use iced::futures::StreamExt;
 use iced::futures::channel::mpsc;
 use iced::futures::channel::oneshot;
+use iced::futures::channel::oneshot::Sender;
 use iced::stream::channel;
 use iced::widget::combo_box;
 use iced::widget::row;
@@ -111,12 +116,14 @@ enum RenderState {
     Pending,
     Rendering { update: RenderUpdate },
     Done { result: Image },
+    Stopping,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
     LinkSender(mpsc::Sender<RendererInput>),
     StartRender,
+    StopRender,
     RenderingProgress(RenderUpdate),
     RenderingDone(Image),
     SelectScene(String),
@@ -156,6 +163,15 @@ fn update(state: &mut State, message: Message) {
             } else {
                 state.config_has_error = Some("Resolution Y must be a number".to_owned());
                 return;
+            }
+        }
+        Message::StopRender => {
+            if let RenderState::NotRendering | RenderState::Done { .. } = state.rendering {
+                return;
+            }
+            state.rendering = RenderState::Stopping;
+            if let Some(channel) = &mut state.renderer_channel {
+                let _ = channel.try_send(RendererInput::StopRendering);
             }
         }
         Message::RenderingDone(result) => {
@@ -238,7 +254,9 @@ fn view(state: &State) -> Element<'_, Message> {
             .height(state.render_config.resolution_y as f32),
             {
                 let image = match &state.rendering {
-                    RenderState::NotRendering | RenderState::Pending => &state.empty_image,
+                    RenderState::NotRendering | RenderState::Pending | RenderState::Stopping => {
+                        &state.empty_image
+                    }
                     RenderState::Rendering { update } => &update.image,
                     RenderState::Done { result } => &result,
                 };
@@ -254,26 +272,31 @@ fn view(state: &State) -> Element<'_, Message> {
                 )
             },
             row![
-                // button("Clear").on_press_maybe(match &state.rendering {
-                //     RenderState::NotRendering
-                //     | RenderState::Pending
-                //     | RenderState::Rendering { update: _ } => None,
-                //     RenderState::Done { result: _ } => Some(Message::ClearRender),
-                // }),
+                button("Stop").on_press_maybe(match &state.rendering {
+                    RenderState::NotRendering
+                    | RenderState::Pending
+                    | RenderState::Done { result: _ }
+                    | RenderState::Stopping => None,
+                    RenderState::Rendering { update: _ } => Some(Message::StopRender),
+                }),
                 button(text(match &state.rendering {
                     RenderState::NotRendering | RenderState::Done { result: _ } =>
                         "Render".to_owned(),
-                    RenderState::Pending | RenderState::Rendering { update: _ } =>
-                        "Rendering...".to_owned(),
+                    RenderState::Pending
+                    | RenderState::Rendering { update: _ }
+                    | RenderState::Stopping => "Rendering...".to_owned(),
                 }))
                 .on_press_maybe(match &state.rendering {
                     RenderState::NotRendering | RenderState::Done { result: _ } =>
                         Some(Message::StartRender),
-                    RenderState::Pending | RenderState::Rendering { update: _ } => None,
+                    RenderState::Pending
+                    | RenderState::Rendering { update: _ }
+                    | RenderState::Stopping => None,
                 }),
                 text(match &state.rendering {
                     RenderState::NotRendering => "".to_owned(),
                     RenderState::Pending => "...".to_owned(),
+                    RenderState::Stopping => "Stopping...".to_owned(),
                     RenderState::Rendering { update } => format!("{:.2}%", update.progress * 100.0),
                     RenderState::Done { result } =>
                         format!("Done! ({}x{})", result.resolution.0, result.resolution.1),
@@ -432,6 +455,12 @@ impl<Message> canvas::Program<Message> for CanvasState<'_> {
 
 enum RendererInput {
     StartRendering { config: RenderConfig },
+    StopRendering,
+}
+
+struct ActiveRender {
+    stop_sender: Sender<()>,
+    handles: Vec<task::JoinHandle<()>>,
 }
 
 fn render_worker() -> impl Stream<Item = Message> {
@@ -442,6 +471,8 @@ fn render_worker() -> impl Stream<Item = Message> {
         // Send the sender back to the application
         let _ = output.send(Message::LinkSender(sender)).await;
 
+        let mut active_render: Option<ActiveRender> = None;
+
         loop {
             // Read next input sent from `Application`
             let input = receiver.select_next_some().await;
@@ -450,18 +481,33 @@ fn render_worker() -> impl Stream<Item = Message> {
                 RendererInput::StartRendering { config } => {
                     let (progress_sender, mut progress_receiver) =
                         mpsc::channel::<RenderUpdate>(100);
-                    let (result_sender, result_receiver) = oneshot::channel();
-                    let render_thread = std::thread::spawn(move || {
-                        let mut sender = progress_sender;
-                        let result = render(config, &mut sender);
-                        let _ = result_sender.send(result);
-                    });
+                    let (stop_sender, stop_receiver) = oneshot::channel();
 
-                    while let Some(update) = progress_receiver.next().await {
-                        let _ = output.send(Message::RenderingProgress(update)).await;
-                    }
-                    if let Ok(result) = result_receiver.await {
-                        let _ = output.send(Message::RenderingDone(result)).await;
+                    let mut output_clone = output.clone();
+                    let render_handle = task::spawn(async move {
+                        let mut sender = progress_sender;
+                        let result = render(config, &mut sender, stop_receiver);
+                        let _ = output_clone.send(Message::RenderingDone(result)).await;
+                    });
+                    let mut output_clone = output.clone();
+                    let forward_updates_handle = task::spawn(async move {
+                        // Forward updates to the main output
+                        while let Some(update) = progress_receiver.next().await {
+                            let _ = output_clone.send(Message::RenderingProgress(update)).await;
+                        }
+                    });
+                    active_render = Some(ActiveRender {
+                        stop_sender,
+                        handles: vec![render_handle, forward_updates_handle],
+                    });
+                }
+                RendererInput::StopRendering => {
+                    // Handle stop rendering
+                    if let Some(render) = active_render.take() {
+                        let _ = render.stop_sender.send(());
+                        futures::future::join_all(render.handles).await;
+                    } else {
+                        println!("No active render to stop.");
                     }
                 }
             }
