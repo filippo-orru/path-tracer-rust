@@ -9,24 +9,24 @@ use std::{
     fmt::Display,
     hash::{Hash, Hasher},
     io::Write,
-    ops::{Add, Div, Mul, Sub},
     process::exit,
     sync::{atomic, mpsc, Arc},
     thread,
     time::{Duration, Instant},
 };
 
+use glam::Vec3;
 use iced::futures::{self, channel::mpsc::SendError, Sink, SinkExt};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use scenes::load_scenes;
 
 const USE_CULLING: bool = false;
-const PI: f64 = 3.141592653589793;
+const PI: f32 = 3.141592653589793;
 
 /// If true, render with a fixed sequence of random numbers.
 const MOCK_RANDOM: bool = false;
-const MOCK_RANDOMS: [f64; 9] = [
+const MOCK_RANDOMS: [f32; 9] = [
     0.75902418061906407,
     0.023879213030728041,
     0.21016190197770457,
@@ -41,149 +41,40 @@ const MOCK_RANDOMS_LEN: usize = MOCK_RANDOMS.len();
 static MOCK_RANDOMS_INDEX: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
 
 // uniform double random generator function
-fn rand01() -> f64 {
+fn rand01() -> f32 {
     if MOCK_RANDOM {
         let i = MOCK_RANDOMS_INDEX.fetch_add(1, atomic::Ordering::Relaxed) % MOCK_RANDOMS_LEN;
         return MOCK_RANDOMS[i];
     } else {
-        return rand::random::<f64>();
+        return rand::random::<f32>();
     }
 }
 
-pub fn gamma_correction(x: f64) -> f64 {
+pub fn gamma_correction(x: f32) -> f32 {
     return x.clamp(0.0, 1.0).powf(1.0 / 2.2);
 }
 
-pub fn to_int_with_gamma_correction(x: f64) -> usize {
+pub fn to_int_with_gamma_correction(x: f32) -> usize {
     return (255.0 * gamma_correction(x) + 0.5) as usize;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Vector {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-}
-
-impl Add<Self> for Vector {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self::Output {
-        return Vector {
-            x: self.x + other.x,
-            y: self.y + other.y,
-            z: self.z + other.z,
-        };
-    }
-}
-
-impl Sub<Self> for Vector {
-    type Output = Self;
-
-    fn sub(self, other: Self) -> Self::Output {
-        return Vector {
-            x: self.x - other.x,
-            y: self.y - other.y,
-            z: self.z - other.z,
-        };
-    }
-}
-
-impl Mul<f64> for Vector {
-    type Output = Self;
-
-    fn mul(self, v: f64) -> Self::Output {
-        return Vector {
-            x: self.x * v,
-            y: self.y * v,
-            z: self.z * v,
-        };
-    }
-}
-
-impl Div<f64> for Vector {
-    type Output = Self;
-
-    fn div(self, v: f64) -> Self::Output {
-        return Vector {
-            x: self.x / v,
-            y: self.y / v,
-            z: self.z / v,
-        };
-    }
-}
-
-impl Mul<Self> for Vector {
-    type Output = Self;
-
-    fn mul(self, other: Self) -> Self::Output {
-        return Vector {
-            x: self.x * other.x,
-            y: self.y * other.y,
-            z: self.z * other.z,
-        };
-    }
-}
-
-impl Vector {
-    fn zero() -> Self {
-        Vector {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        }
-    }
-
-    const fn from(a: f64, b: f64, c: f64) -> Self {
-        Vector { x: a, y: b, z: c }
-    }
-
-    const fn uniform(u: f64) -> Self {
-        Vector { x: u, y: u, z: u }
-    }
-
-    fn normalize(mut self) -> Self {
-        let m = self.magnitude();
-        self.x /= m;
-        self.y /= m;
-        self.z /= m;
-        return self;
-    }
-
-    fn dot(&self, other: &Vector) -> f64 {
-        return self.x * other.x + self.y * other.y + self.z * other.z;
-    }
-
-    fn cross(&self, other: &Vector) -> Vector {
-        return Vector {
-            x: self.y * other.z - self.z * other.y,
-            y: self.z * other.x - self.x * other.z,
-            z: self.x * other.y - self.y * other.x,
-        };
-    }
-
-    fn magnitude(&self) -> f64 {
-        return (self.x.powi(2) + self.y.powi(2) + self.z.powi(2)).sqrt();
-    }
-}
-
 struct Ray {
-    origin: Vector,
-    direction: Vector,
+    origin: Vec3,
+    direction: Vec3,
 }
 
 #[derive(Clone, Debug)]
-enum ReflectType {
+pub enum ReflectType {
     Diffuse,
     Specular,
     Refract,
 }
 
 #[derive(Clone, Debug)]
-struct Material {
-    color: Vector,
-    emmission: Vector,
-    reflect_type: ReflectType,
+pub struct Material {
+    pub color: Vec3,
+    pub emmission: Vec3,
+    pub reflect_type: ReflectType,
 }
 
 #[derive(Clone, Debug)]
@@ -194,19 +85,19 @@ pub struct SceneData {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CameraData {
-    position: Vector,
+pub struct CameraData {
+    pub position: Vec3,
     /// normal to sensor plane
-    direction: Vector,
+    pub direction: Vec3,
     /// in meters
-    focal_length: f64,
+    pub focal_length: f32,
 }
 
 #[derive(Clone, Debug)]
-struct SceneObjectData {
-    type_: SceneObject,
-    position: Vector,
-    material: Material,
+pub struct SceneObjectData {
+    pub type_: SceneObject,
+    pub position: Vec3,
+    pub material: Material,
 }
 
 impl SceneObjectData {
@@ -226,8 +117,8 @@ impl SceneObjectData {
                         let va_vb = tri.b - tri.a;
                         let va_vc = tri.c - tri.a;
 
-                        let pvec = ray.direction.cross(&va_vc);
-                        let determinant = va_vb.dot(&pvec);
+                        let pvec = ray.direction.cross(va_vc);
+                        let determinant = va_vb.dot(pvec);
 
                         if USE_CULLING {
                             if determinant < 1e-4 {
@@ -241,20 +132,20 @@ impl SceneObjectData {
 
                         let inv_determinant = 1.0 / determinant;
                         let tvec = ray.origin - tri.a;
-                        let u: f64 = tvec.dot(&pvec) * inv_determinant;
+                        let u: f32 = tvec.dot(pvec) * inv_determinant;
                         if u < 0.0 || u > 1.0 {
                             continue;
                         }
 
-                        let qvec = tvec.cross(&va_vb);
-                        let v: f64 = ray.direction.dot(&qvec) * inv_determinant;
+                        let qvec = tvec.cross(va_vb);
+                        let v: f32 = ray.direction.dot(qvec) * inv_determinant;
                         if v < 0.0 || (u + v) > 1.0 {
                             continue;
                         }
 
-                        let distance: f64 = va_vb.dot(&qvec) * inv_determinant;
+                        let distance: f32 = va_vb.dot(qvec) * inv_determinant;
                         let intersection = ray.direction * distance;
-                        let normal = va_vb.cross(&va_vc).normalize();
+                        let normal = va_vb.cross(va_vc).normalize();
 
                         return IntersectResult::Hit(Hit {
                             distance,
@@ -267,25 +158,38 @@ impl SceneObjectData {
             },
         };
     }
+
+    pub fn to_triangles(&self) -> &[Triangle] {
+        return self.type_.to_triangles();
+    }
 }
 
 #[derive(Clone, Debug)]
-enum SceneObject {
-    Sphere { radius: f64 },
+pub(crate) enum SceneObject {
+    Sphere { radius: f32 },
     Mesh(Mesh),
+}
+
+impl SceneObject {
+    fn to_triangles(&self) -> &[Triangle] {
+        match self {
+            SceneObject::Sphere { .. } => &[],
+            SceneObject::Mesh(mesh) => &mesh.triangles,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct StandaloneSphere {
-    position: Vector,
-    radius: f64,
+    position: Vec3,
+    radius: f32,
 }
 
-fn intersect_sphere(position: Vector, radius: f64, ray: &Ray) -> IntersectResult {
-    let op: Vector = position - ray.origin;
-    let eps: f64 = 1e-4;
-    let b = op.dot(&ray.direction);
-    let mut det = b.powi(2) - op.dot(&op) + radius.powi(2);
+fn intersect_sphere(position: Vec3, radius: f32, ray: &Ray) -> IntersectResult {
+    let op: Vec3 = position - ray.origin;
+    let eps: f32 = 1e-4;
+    let b = op.dot(ray.direction);
+    let mut det = b.powi(2) - op.dot(op) + radius.powi(2);
     if det < 0.0 {
         return IntersectResult::NoHit;
     } else {
@@ -316,14 +220,14 @@ struct Mesh {
 }
 
 #[derive(Clone, Debug)]
-struct Triangle {
-    a: Vector,
-    b: Vector,
-    c: Vector,
+pub struct Triangle {
+    pub a: Vec3,
+    pub b: Vec3,
+    pub c: Vec3,
 }
 
 impl Triangle {
-    fn transformed(&self, v: &Vector) -> Triangle {
+    fn transformed(&self, v: &Vec3) -> Triangle {
         Triangle {
             a: self.a + *v,
             b: self.b + *v,
@@ -334,9 +238,9 @@ impl Triangle {
 
 #[derive(PartialEq, Debug)]
 struct Hit {
-    distance: f64,
-    intersection: Vector,
-    normal: Vector,
+    distance: f32,
+    intersection: Vec3,
+    normal: Vec3,
 }
 
 enum IntersectResult {
@@ -378,14 +282,14 @@ fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObjectData>) -> SceneInte
 }
 
 const MAX_DEPTH: usize = 12;
-fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Vector {
+fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Vec3 {
     return match intersect_scene(&ray, scene_objects) {
-        SceneIntersectResult::NoHit => Vector::zero(),
+        SceneIntersectResult::NoHit => Vec3::default(),
         SceneIntersectResult::Hit { object_id, hit } => {
             let object = &scene_objects[object_id];
-            let mut color: Vector = object.material.color;
+            let mut color: Vec3 = object.material.color;
             let max_reflection = color.x.max(color.y.max(color.z));
-            let normal_towards_ray = if hit.normal.dot(&ray.direction) < 0.0 {
+            let normal_towards_ray = if hit.normal.dot(ray.direction) < 0.0 {
                 hit.normal
             } else {
                 hit.normal * -1.0
@@ -407,18 +311,18 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Ve
                         // Ideal DIFFUSE reflection
 
                         // cosinus-weighted importance sampling
-                        let r1: f64 = 2.0 * PI * rand01();
-                        let r2: f64 = rand01();
-                        let r2s: f64 = r2.sqrt();
-                        let w: Vector = normal_towards_ray;
+                        let r1: f32 = 2.0 * PI * rand01();
+                        let r2: f32 = rand01();
+                        let r2s: f32 = r2.sqrt();
+                        let w: Vec3 = normal_towards_ray;
                         let u = (if w.x.abs() > 0.1 {
-                            Vector::from(0.0, 1.0, 0.0)
+                            Vec3::new(0.0, 1.0, 0.0)
                         } else {
-                            Vector::from(1.0, 0.0, 0.0)
+                            Vec3::new(1.0, 0.0, 0.0)
                         })
-                        .cross(&w)
+                        .cross(w)
                         .normalize();
-                        let v = w.cross(&u);
+                        let v = w.cross(u);
                         let d = (u * r1.cos() * r2s + v * r1.sin() * r2s + w * (1.0 - r2).sqrt())
                             .normalize();
 
@@ -439,7 +343,7 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Ve
                                 &Ray {
                                     origin: hit.intersection,
                                     direction: ray.direction
-                                        - hit.normal * 2.0 * hit.normal.dot(&ray.direction),
+                                        - hit.normal * 2.0 * hit.normal.dot(ray.direction),
                                 },
                                 new_depth,
                                 scene_objects,
@@ -450,13 +354,13 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Ve
                         let refl_ray = Ray {
                             origin: hit.intersection,
                             direction: ray.direction
-                                - hit.normal * 2.0 * hit.normal.dot(&ray.direction),
+                                - hit.normal * 2.0 * hit.normal.dot(ray.direction),
                         };
-                        let into = hit.normal.dot(&normal_towards_ray) > 0.0; // Ray from outside going in?
+                        let into = hit.normal.dot(normal_towards_ray) > 0.0; // Ray from outside going in?
                         let nc = 1.0; // Index of refraction air
                         let nt = 1.5; // Index of refraction glass
-                        let nnt: f64 = if into { nc / nt } else { nt / nc };
-                        let ddn = ray.direction.dot(&normal_towards_ray);
+                        let nnt: f32 = if into { nc / nt } else { nt / nc };
+                        let ddn = ray.direction.dot(normal_towards_ray);
                         let cos2t = 1.0 - nnt.powi(2) * (1.0 - ddn.powi(2));
 
                         if cos2t < 0.0 {
@@ -469,7 +373,7 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Ve
                             let a = nt - nc;
                             let b = nt + nc;
                             let r0 = a * a / (b * b);
-                            let c = 1.0 - (if into { -ddn } else { tdir.dot(&hit.normal) });
+                            let c = 1.0 - (if into { -ddn } else { tdir.dot(hit.normal) });
                             let re = r0 + (1.0 - r0) * c.powi(5);
                             let tr = 1.0 - re;
                             let p = 0.25 + 0.5 * re;
@@ -620,12 +524,12 @@ pub struct RenderUpdate {
 
 #[derive(Debug, Clone)]
 pub struct Image {
-    pub pixels: Vec<Vector>,
+    pub pixels: Vec<Vec3>,
     pub resolution: (usize, usize),
     pub hash: u64,
 }
 impl Image {
-    fn new(pixels: Vec<Vector>, resolution: (usize, usize)) -> Self {
+    fn new(pixels: Vec<Vec3>, resolution: (usize, usize)) -> Self {
         Self {
             hash: hash_vec_of_vectors(&pixels),
             pixels,
@@ -641,7 +545,7 @@ fn benchmark_function<T, F: FnOnce() -> T>(func: F) -> T {
     return t;
 }
 
-pub fn hash_vec_of_vectors(vectors: &[Vector]) -> u64 {
+pub fn hash_vec_of_vectors(vectors: &[Vec3]) -> u64 {
     benchmark_function(|| {
         let mut hasher = DefaultHasher::new();
         for v in vectors {
@@ -666,23 +570,23 @@ pub fn render(
         let scene_objects = scene.objects.clone();
 
         //-- setup sensor
-        let sensor_origin: Vector = scene.camera.position;
-        let sensor_view_direction: Vector = scene.camera.direction.normalize();
-        let sensor_width: f64 = 0.036;
-        let sensor_height: f64 = sensor_width * 2.0 / 3.0;
-        let focal_length: f64 = scene.camera.focal_length;
+        let sensor_origin: Vec3 = scene.camera.position;
+        let sensor_view_direction: Vec3 = scene.camera.direction.normalize();
+        let sensor_width: f32 = 0.036;
+        let sensor_height: f32 = sensor_width * 2.0 / 3.0;
+        let focal_length: f32 = scene.camera.focal_length;
         // lens center (pinhole)
         let lens_center = sensor_origin + sensor_view_direction * focal_length;
 
         //-- orthogonal axes spanning the sensor plane
-        let su: Vector = sensor_view_direction
-            .cross(&if sensor_view_direction.y.abs() < 0.9 {
-                Vector::from(0.0, 1.0, 0.0)
+        let su: Vec3 = sensor_view_direction
+            .cross(if sensor_view_direction.y.abs() < 0.9 {
+                Vec3::new(0.0, 1.0, 0.0)
             } else {
-                Vector::from(0.0, 0.0, 1.0)
+                Vec3::new(0.0, 0.0, 1.0)
             })
             .normalize();
-        let sv: Vector = su.cross(&sensor_view_direction);
+        let sv: Vec3 = su.cross(sensor_view_direction);
 
         let grid_size = resx * resy;
 
@@ -702,7 +606,7 @@ pub fn render(
         let get_processed_pixel_count = processed_pixel_count.clone();
 
         // TODO use better concurrent vec
-        let pixels = Arc::new(std::sync::Mutex::new(vec![Vector::zero(); grid_size]));
+        let pixels = Arc::new(std::sync::Mutex::new(vec![Vec3::default(); grid_size]));
         let get_pixels = pixels.clone();
 
         // Start thread that sends regular progress updates
@@ -725,36 +629,36 @@ pub fn render(
 
         let render_thread_handle = s.spawn(move || {
             // Pure function for rendering a single pixel
-            let render_pixel = |pixel_index: usize| -> Vector {
+            let render_pixel = |pixel_index: usize| -> Vec3 {
                 let y = resy - 1 - pixel_index / resx;
                 let x = pixel_index % resx;
 
-                let mut radiance_v: Vector = Vector::zero();
+                let mut radiance_v: Vec3 = Vec3::default();
 
                 for s in 0..render_config.samples_per_pixel {
                     // map to 2x2 subpixel rows and cols
-                    let ysub: f64 = ((s / 2) % 2) as f64;
-                    let xsub: f64 = (s % 2) as f64;
+                    let ysub: f32 = ((s / 2) % 2) as f32;
+                    let xsub: f32 = (s % 2) as f32;
 
                     // sample sensor subpixel in [-1,1]
-                    let r1: f64 = 2.0 * rand01();
-                    let r2: f64 = 2.0 * rand01();
-                    let xfilter: f64 = if r1 < 1.0 {
+                    let r1: f32 = 2.0 * rand01();
+                    let r2: f32 = 2.0 * rand01();
+                    let xfilter: f32 = if r1 < 1.0 {
                         // TODO not sure what this is
                         r1.sqrt() - 1.0
                     } else {
                         1.0 - (2.0 - r1).sqrt()
                     };
-                    let yfilter: f64 = if r2 < 1.0 {
+                    let yfilter: f32 = if r2 < 1.0 {
                         r2.sqrt() - 1.0
                     } else {
                         1.0 - (2.0 - r2).sqrt()
                     };
 
                     // x and y sample position on sensor plane
-                    let sx: f64 = ((x as f64 + 0.5 * (0.5 + xsub + xfilter)) / resx as f64 - 0.5)
+                    let sx: f32 = ((x as f32 + 0.5 * (0.5 + xsub + xfilter)) / resx as f32 - 0.5)
                         * sensor_width;
-                    let sy: f64 = ((y as f64 + 0.5 * (0.5 + ysub + yfilter)) / resy as f64 - 0.5)
+                    let sy: f32 = ((y as f32 + 0.5 * (0.5 + ysub + yfilter)) / resy as f32 - 0.5)
                         * sensor_height;
 
                     // 3d sample position on sensor
@@ -770,10 +674,10 @@ pub fn render(
                     radiance_v = radiance_v + radiance(&ray, 0, &scene_objects);
                 }
                 // normalize radiance by number of samples
-                radiance_v = radiance_v / render_config.samples_per_pixel as f64;
+                radiance_v = radiance_v / render_config.samples_per_pixel as f32;
                 processed_pixel_count.fetch_add(1, atomic::Ordering::Relaxed);
 
-                Vector::from(
+                Vec3::new(
                     radiance_v.x.clamp(0.0, 1.0),
                     radiance_v.y.clamp(0.0, 1.0),
                     radiance_v.z.clamp(0.0, 1.0),

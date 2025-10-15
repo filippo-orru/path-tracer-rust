@@ -1,6 +1,7 @@
 struct Uniforms {
-	resolution: vec2f,
     offset: vec2f,
+	projection: mat4x4<f32>,
+
 	// center: vec2f,
 	// scale: f32,
 	// max_iter: u32,
@@ -23,8 +24,13 @@ struct Vertex {
 fn vertex_main(
     vert: Vertex,
 ) -> VertexOut {
+    var position = vert.position + vec4f(uniforms.offset, 0.0, 0.0);
+
+    // Projection matrix
+    position = uniforms.projection * position;
+
     var vsOutput: VertexOut;
-    vsOutput.position = vert.position + vec4f(uniforms.offset, 0.0, 0.0);
+    vsOutput.position = position;
     vsOutput.color = vert.color;
     return vsOutput;
 }
@@ -34,7 +40,6 @@ fn fragment_main(
     fragData: VertexOut,
 ) -> @location(0) vec4<f32>
 {
-    var uv = fragData.position.xy / uniforms.resolution * 2.0 - vec2<f32>(1.0, 1.0);
     return fragData.color;
 } 
 

@@ -8,6 +8,7 @@ use iced::futures::Stream;
 use iced::futures::StreamExt;
 use iced::stream::channel;
 use iced::widget::combo_box;
+use iced::widget::row;
 use iced::widget::shader;
 use iced::widget::text_input;
 use iced::widget::{button, canvas, column, container, text};
@@ -24,7 +25,6 @@ use crate::render::Image;
 use crate::render::RenderConfig;
 use crate::render::RenderUpdate;
 use crate::render::SceneData;
-use crate::viewport::Controls;
 use crate::viewport::ViewportProgram;
 
 mod render;
@@ -49,10 +49,10 @@ fn main() -> iced::Result {
 struct State {
     renderer_channel: Option<mpsc::Sender<RendererInput>>,
 
-    scenes: Vec<SceneData>,
+    scenes: Vec<RefCell<SceneData>>,
     scene_ids_selector: combo_box::State<String>,
     selected_scene_id: String,
-    selected_scene: Option<SceneData>,
+    selected_scene: RefCell<SceneData>,
 
     resolution_y: String,
     samples_per_pixel: String,
@@ -64,16 +64,27 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let scenes = load_scenes();
-        let selected_scene_id = scenes.get(0).unwrap().id.clone();
+        let scenes = load_scenes()
+            .into_iter()
+            .map(RefCell::new)
+            .collect::<Vec<_>>();
+        let initial_id = "mesh";
+        let mesh = scenes
+            .iter()
+            .find(|s| s.borrow().id == initial_id)
+            .unwrap()
+            .clone();
         Self {
             renderer_channel: None,
             scene_ids_selector: combo_box::State::with_selection(
-                scenes.iter().map(|scene| scene.id.clone()).collect(),
+                scenes
+                    .iter()
+                    .map(|scene| (*scene.borrow()).id.clone())
+                    .collect(),
                 None, // Some(selected_scene_id.clone()).as_ref(),
             ),
-            selected_scene_id,
-            selected_scene: None,
+            selected_scene_id: initial_id.to_owned(),
+            selected_scene: mesh.clone(),
             scenes,
             resolution_y: "300".to_owned(),
             samples_per_pixel: "1000".to_owned(),
@@ -93,6 +104,7 @@ enum RenderState {
 #[derive(Debug, Clone)]
 enum Message {
     LinkSender(mpsc::Sender<RendererInput>),
+    ClearRender,
     StartRender,
     RenderingProgress(RenderUpdate),
     RenderingDone(Image),
@@ -103,6 +115,12 @@ enum Message {
 
 fn update(state: &mut State, message: Message) {
     match message {
+        Message::ClearRender => {
+            state.rendering = RenderState::NotRendering;
+            // if let Some(channel) = &mut state.renderer_channel {
+            //     let _ = channel.try_send(RendererInput::StopRendering);
+            // }
+        }
         Message::StartRender => {
             if let RenderState::Rendering { .. } = state.rendering {
                 return;
@@ -154,92 +172,93 @@ fn create_render_config(state: &State, spp: usize, res_y: usize) -> RenderConfig
     RenderConfig {
         samples_per_pixel: spp,
         resolution_y: res_y,
-        scene: state
-            .scenes
-            .iter()
-            .find(|scene| scene.id == state.selected_scene_id)
-            .unwrap()
-            .clone(),
+        scene: state.selected_scene.borrow().clone(),
     }
 }
 
 fn view(state: &State) -> Element<'_, Message> {
     return container(
         column![
-            shader(ViewportProgram {
-                config: create_render_config(&state, 1, 1),
-                // controls: Controls::default()
-            })
-            .width(Fill)
-            .height(Fill),
-            // text(match &state.rendering {
-            //     RenderState::NotRendering => "Not rendering".to_owned(),
-            //     RenderState::Pending => "Pending...".to_owned(),
-            //     RenderState::Rendering { update } =>
-            //         format!("Rendering... {:.2}%", update.progress * 100.0),
-            //     RenderState::Done { result } => format!(
-            //         "Render done! ({}x{})",
-            //         result.resolution.0, result.resolution.1
-            //     ),
-            // }),
-            // container(
-            //     combo_box(
-            //         &state.scene_ids_selector,
-            //         "Select scene",
-            //         Some(&state.selected_scene_id),
-            //         Message::SelectScene
-            //     )
-            //     .width(250)
-            // )
-            // .padding(10)
-            // .center_x(Length::Shrink),
-            // text("Resolution Y"),
-            // container(
-            //     text_input("Resolution Y", &state.resolution_y.to_string())
-            //         .on_input(Message::UpdateResolutionY)
-            //         .width(250)
-            // )
-            // .padding(10)
-            // .center_x(Length::Shrink),
-            // text("Samples per pixel"),
-            // container(
-            //     text_input("Samples per pixel", &state.samples_per_pixel.to_string())
-            //         .on_input(Message::UpdateSamplesPerPixel)
-            //         .width(250)
-            // )
-            // .padding(10)
-            // .center_x(Length::Shrink),
-            // if let Some(err) = &state.config_has_error {
-            //     text(err).color(Color::from_rgb(1.0, 0.0, 0.0))
-            // } else {
-            //     text("")
-            // },
-            // // .width(400)
-            // // .height(400),
-            // {
-            //     let image = match &state.rendering {
-            //         RenderState::NotRendering => None,
-            //         RenderState::Pending => None,
-            //         RenderState::Rendering { update } => Some(&update.image),
-            //         RenderState::Done { result } => Some(result),
-            //     };
-            //     match image {
-            //         None => container(text("")),
-            //         Some(image) => {
-            //             let (width, height) = image.resolution;
-            //             // let aspect_ratio = width as f32 / height as f32;
+            text(match &state.rendering {
+                RenderState::NotRendering => "Not rendering".to_owned(),
+                RenderState::Pending => "Pending...".to_owned(),
+                RenderState::Rendering { update } =>
+                    format!("Rendering... {:.2}%", update.progress * 100.0),
+                RenderState::Done { result } => format!(
+                    "Render done! ({}x{})",
+                    result.resolution.0, result.resolution.1
+                ),
+            }),
+            column![
+                container(
+                    combo_box(
+                        &state.scene_ids_selector,
+                        "Select scene",
+                        Some(&state.selected_scene_id),
+                        Message::SelectScene
+                    )
+                    .width(250)
+                )
+                .padding(10)
+                .center_x(Length::Shrink),
+                text("Resolution Y"),
+                container(
+                    text_input("Resolution Y", &state.resolution_y.to_string())
+                        .on_input(Message::UpdateResolutionY)
+                        .width(250)
+                )
+                .padding(10)
+                .center_x(Length::Shrink),
+                text("Samples per pixel"),
+                container(
+                    text_input("Samples per pixel", &state.samples_per_pixel.to_string())
+                        .on_input(Message::UpdateSamplesPerPixel)
+                        .width(250)
+                )
+                .padding(10)
+                .center_x(Length::Shrink),
+                if let Some(err) = &state.config_has_error {
+                    text(err).color(Color::from_rgb(1.0, 0.0, 0.0))
+                } else {
+                    text("")
+                },
+            ]
+            .spacing(10),
+            {
+                let image = match &state.rendering {
+                    RenderState::NotRendering => None,
+                    RenderState::Pending => None,
+                    RenderState::Rendering { update } => Some(&update.image),
+                    RenderState::Done { result } => Some(result),
+                };
+                match image {
+                    None => container(
+                        shader(ViewportProgram {
+                            config: create_render_config(&state, 1, 1),
+                            // controls: Controls::default()
+                        })
+                        .width(400)
+                        .height(400),
+                    ),
+                    Some(image) => {
+                        let (width, height) = image.resolution;
+                        // let aspect_ratio = width as f32 / height as f32;
 
-            //             // Use Length::Fill to allow container to expand, but keep aspect ratio
-            //             container(
-            //                 canvas(CanvasState { image })
-            //                     .width(width as f32)
-            //                     .height(height as f32),
-            //             )
-            //             .padding(20)
-            //         }
-            //     }
-            // },
-            // button("Render").on_press(Message::StartRender)
+                        // Use Length::Fill to allow container to expand, but keep aspect ratio
+                        container(
+                            canvas(CanvasState { image })
+                                .width(width as f32)
+                                .height(height as f32),
+                        )
+                        .padding(20)
+                    }
+                }
+            },
+            row![
+                button("Clear").on_press(Message::ClearRender),
+                button("Render").on_press(Message::StartRender),
+            ]
+            .spacing(10),
         ]
         .align_x(Horizontal::Center),
     )
@@ -365,11 +384,12 @@ fn render_worker() -> impl Stream<Item = Message> {
                     let (progress_sender, mut progress_receiver) =
                         mpsc::channel::<RenderUpdate>(100);
                     let (result_sender, result_receiver) = oneshot::channel();
-                    std::thread::spawn(move || {
+                    let render_thread = std::thread::spawn(move || {
                         let mut sender = progress_sender;
                         let result = render(config, &mut sender);
                         let _ = result_sender.send(result);
                     });
+
                     while let Some(update) = progress_receiver.next().await {
                         let _ = output.send(Message::RenderingProgress(update)).await;
                     }
@@ -382,6 +402,6 @@ fn render_worker() -> impl Stream<Item = Message> {
     })
 }
 
-fn subscription(_state: &State) -> Subscription<Message> {
+fn subscription(state: &State) -> Subscription<Message> {
     Subscription::run(render_worker)
 }

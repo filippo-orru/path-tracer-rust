@@ -2,25 +2,25 @@ use super::*;
 
 #[test]
 fn test_vector_operations() {
-    let v1 = Vector::from(1.0, 2.0, 3.0);
-    let v2 = Vector::from(2.0, 3.0, 4.0);
-    let v3 = Vector::from(3.0, 4.0, 5.0);
+    let v1 = Vec3::from(1.0, 2.0, 3.0);
+    let v2 = Vec3::from(2.0, 3.0, 4.0);
+    let v3 = Vec3::from(3.0, 4.0, 5.0);
 
-    assert_eq!(v1 + v2, Vector::from(3.0, 5.0, 7.0));
-    assert_eq!(v3 - v2, Vector::from(1.0, 1.0, 1.0));
-    assert_eq!(v1 * v2, Vector::from(2.0, 6.0, 12.0));
-    assert_eq!(v1 * 2.0, Vector::from(2.0, 4.0, 6.0));
-    assert_eq!(v2 / 2.0, Vector::from(1.0, 1.5, 2.0));
+    assert_eq!(v1 + v2, Vec3::from(3.0, 5.0, 7.0));
+    assert_eq!(v3 - v2, Vec3::from(1.0, 1.0, 1.0));
+    assert_eq!(v1 * v2, Vec3::from(2.0, 6.0, 12.0));
+    assert_eq!(v1 * 2.0, Vec3::from(2.0, 4.0, 6.0));
+    assert_eq!(v2 / 2.0, Vec3::from(1.0, 1.5, 2.0));
 
     assert_eq!(v1.dot(&v2), 20.0);
-    assert_eq!(v1.cross(&v2), Vector::from(-1.0, 2.0, -1.0));
+    assert_eq!(v1.cross(&v2), Vec3::from(-1.0, 2.0, -1.0));
     assert_eq!(
-        Vector::from(1.0, 0.0, 0.0).normalize(),
-        Vector::from(1.0, 0.0, 0.0)
+        Vec3::from(1.0, 0.0, 0.0).normalize(),
+        Vec3::from(1.0, 0.0, 0.0)
     );
     assert_eq!(
-        Vector::from(1.0, 1.0, 0.0).normalize(),
-        Vector::from(0.7071067811865475, 0.7071067811865475, 0.0)
+        Vec3::from(1.0, 1.0, 0.0).normalize(),
+        Vec3::from(0.7071067811865475, 0.7071067811865475, 0.0)
     );
 
     assert_eq!(v1.magnitude(), 3.7416573867739413);
@@ -35,23 +35,21 @@ fn test_helpers() {
 }
 
 const TEST_MAT: Material = Material {
-    color: Vector::from(1.0, 0.0, 0.0),
-    emmission: Vector::from(0.0, 0.0, 0.0),
+    color: Vec3::from(1.0, 0.0, 0.0),
+    emmission: Vec3::from(0.0, 0.0, 0.0),
     reflect_type: ReflectType::Diffuse,
 };
 
 #[test]
 fn test_intersect_scene() {
     let ray = Ray {
-        direction: Vector::from(0.0, 0.0, -1.0),
-        origin: Vector::from(0.0, 0.0, 0.0),
+        direction: Vec3::from(0.0, 0.0, -1.0),
+        origin: Vec3::from(0.0, 0.0, 0.0),
     };
 
     let scene = vec![SceneObjectData {
-        position: Vector::from(0.0, 0.0, -3.0),
-        type_: SceneObject::Sphere {
-            radius: 1.0,
-        },
+        position: Vec3::from(0.0, 0.0, -3.0),
+        type_: SceneObject::Sphere { radius: 1.0 },
         material: TEST_MAT,
     }];
 
@@ -63,8 +61,8 @@ fn test_intersect_scene() {
             object_id: 0,
             hit: Hit {
                 distance: 2.0,
-                intersection: Vector::from(0.0, 0.0, -2.0),
-                normal: Vector::from(0.0, 0.0, 1.0),
+                intersection: Vec3::from(0.0, 0.0, -2.0),
+                normal: Vec3::from(0.0, 0.0, 1.0),
             }
         }
     );
@@ -74,15 +72,13 @@ fn test_intersect_scene() {
 #[test]
 fn test_ray_misses_sphere() {
     let ray = Ray {
-        direction: Vector::from(1.0, 0.0, -1.0).normalize(),
-        origin: Vector::from(2.0, 0.0, 0.0),
+        direction: Vec3::from(1.0, 0.0, -1.0).normalize(),
+        origin: Vec3::from(2.0, 0.0, 0.0),
     };
 
     let scene = vec![SceneObjectData {
-        position: Vector::from(0.0, 0.0, -3.0),
-        type_: SceneObject::Sphere {
-            radius: 1.0,
-        },
+        position: Vec3::from(0.0, 0.0, -3.0),
+        type_: SceneObject::Sphere { radius: 1.0 },
         material: TEST_MAT,
     }];
 
@@ -94,15 +90,13 @@ fn test_ray_misses_sphere() {
 #[test]
 fn test_ray_inside_sphere() {
     let ray = Ray {
-        direction: Vector::from(0.0, 0.0, -1.0),
-        origin: Vector::from(0.0, 0.0, 0.0),
+        direction: Vec3::from(0.0, 0.0, -1.0),
+        origin: Vec3::from(0.0, 0.0, 0.0),
     };
 
     let scene = vec![SceneObjectData {
-        position: Vector::from(0.0, 0.0, 0.0),
-        type_: SceneObject::Sphere {
-            radius: 1.0,
-        },
+        position: Vec3::from(0.0, 0.0, 0.0),
+        type_: SceneObject::Sphere { radius: 1.0 },
         material: TEST_MAT,
     }];
 
@@ -114,8 +108,8 @@ fn test_ray_inside_sphere() {
             object_id: 0,
             hit: Hit {
                 distance: 1.0,
-                intersection: Vector::from(0.0, 0.0, -1.0),
-                normal: Vector::from(0.0, 0.0, -1.0),
+                intersection: Vec3::from(0.0, 0.0, -1.0),
+                normal: Vec3::from(0.0, 0.0, -1.0),
             }
         }
     );
@@ -125,15 +119,13 @@ fn test_ray_inside_sphere() {
 #[test]
 fn test_ray_tangent_to_sphere() {
     let ray = Ray {
-        direction: Vector::from(0.0, 0.0, -1.0),
-        origin: Vector::from(0.0, 1.0, 0.0),
+        direction: Vec3::from(0.0, 0.0, -1.0),
+        origin: Vec3::from(0.0, 1.0, 0.0),
     };
 
     let scene = vec![SceneObjectData {
-        position: Vector::from(0.0, 0.0, -3.0),
-        type_: SceneObject::Sphere {
-            radius: 1.0,
-        },
+        position: Vec3::from(0.0, 0.0, -3.0),
+        type_: SceneObject::Sphere { radius: 1.0 },
         material: TEST_MAT,
     }];
 
@@ -144,8 +136,8 @@ fn test_ray_tangent_to_sphere() {
             object_id: 0,
             hit: Hit {
                 distance: 3.0,
-                intersection: Vector::from(0.0, 1.0, -3.0),
-                normal: Vector::from(0.0, 1.0, 0.0),
+                intersection: Vec3::from(0.0, 1.0, -3.0),
+                normal: Vec3::from(0.0, 1.0, 0.0),
             }
         }
     );
@@ -155,35 +147,31 @@ fn test_ray_tangent_to_sphere() {
 fn test_radiance() {
     let scene = vec![
         SceneObjectData {
-            position: Vector::from(0.0, 0.0, -3.0),
-            type_: SceneObject::Sphere {
-                radius: 1.0,
-            },
+            position: Vec3::from(0.0, 0.0, -3.0),
+            type_: SceneObject::Sphere { radius: 1.0 },
             material: Material {
-                color: Vector::from(1.0, 0.0, 0.0),
-                emmission: Vector::from(0.0, 0.0, 0.0),
+                color: Vec3::from(1.0, 0.0, 0.0),
+                emmission: Vec3::from(0.0, 0.0, 0.0),
                 reflect_type: ReflectType::Diffuse,
             },
         },
         SceneObjectData {
-            position: Vector::from(0.0, 0.0, 10.0),
-            type_: SceneObject::Sphere {
-                radius: 1.0,
-            },
+            position: Vec3::from(0.0, 0.0, 10.0),
+            type_: SceneObject::Sphere { radius: 1.0 },
             material: Material {
-                color: Vector::from(0.0, 0.0, 0.0),
-                emmission: Vector::from(50.0, 50.0, 50.0),
+                color: Vec3::from(0.0, 0.0, 0.0),
+                emmission: Vec3::from(50.0, 50.0, 50.0),
                 reflect_type: ReflectType::Diffuse,
             },
         },
     ];
 
     let ray = Ray {
-        direction: Vector::from(0.0, 0.0, -1.0),
-        origin: Vector::from(0.0, 0.0, 0.0),
+        direction: Vec3::from(0.0, 0.0, -1.0),
+        origin: Vec3::from(0.0, 0.0, 0.0),
     };
 
-    let mut radiance_v = Vector::zero();
+    let mut radiance_v = Vec3::zero();
     let sample_count = 10_000;
 
     for _ in 0..sample_count {

@@ -3,9 +3,9 @@ use std::{
     io::{BufRead, BufReader},
 };
 
-use super::{Mesh, StandaloneSphere, Triangle, Vector};
+use super::{Mesh, StandaloneSphere, Triangle, Vec3};
 
-pub(crate) fn load_off(path: &str, scale: f64) -> Result<Mesh, std::io::Error> {
+pub(crate) fn load_off(path: &str, scale: f32) -> Result<Mesh, std::io::Error> {
     let file = File::open(path).unwrap();
     let mut reader = BufReader::new(file);
 
@@ -39,18 +39,18 @@ pub(crate) fn load_off(path: &str, scale: f64) -> Result<Mesh, std::io::Error> {
         (counts[0].unwrap(), counts[1].unwrap(), counts[2].unwrap());
 
     let mut vertices = Vec::with_capacity(vertex_count);
-    let mut min_vert = Vector::uniform(f64::INFINITY);
-    let mut max_vert = Vector::uniform(f64::NEG_INFINITY);
+    let mut min_vert = Vec3::splat(f32::INFINITY);
+    let mut max_vert = Vec3::splat(f32::NEG_INFINITY);
     for _ in 0..vertex_count {
         let line = get_line()?;
         let coords = line
             .split_whitespace()
-            .map(|s| s.parse::<f64>().ok())
+            .map(|s| s.parse::<f32>().ok())
             .collect::<Vec<_>>();
         if coords.len() != 3 {
             return bad_data("Invalid vertex coordinates");
         }
-        let vert = Vector::from(coords[0].unwrap(), coords[1].unwrap(), coords[2].unwrap()) * scale;
+        let vert = Vec3::new(coords[0].unwrap(), coords[1].unwrap(), coords[2].unwrap()) * scale;
         vertices.push(vert);
 
         if vert.x < min_vert.x {
@@ -74,7 +74,7 @@ pub(crate) fn load_off(path: &str, scale: f64) -> Result<Mesh, std::io::Error> {
         }
     }
 
-    let bounding_sphere_pos = Vector {
+    let bounding_sphere_pos = Vec3 {
         x: min_vert.x + max_vert.x * 0.5,
         y: min_vert.y + max_vert.y * 0.5,
         z: min_vert.z + max_vert.z * 0.5,
@@ -82,8 +82,8 @@ pub(crate) fn load_off(path: &str, scale: f64) -> Result<Mesh, std::io::Error> {
     let bounding_sphere = StandaloneSphere {
         position: bounding_sphere_pos,
         radius: *vec![
-            (min_vert - bounding_sphere_pos).magnitude(),
-            (max_vert - bounding_sphere_pos).magnitude(),
+            (min_vert - bounding_sphere_pos).length(),
+            (max_vert - bounding_sphere_pos).length(),
         ]
         .iter()
         .max_by(|p1, p2| p1.partial_cmp(&p2).unwrap())
