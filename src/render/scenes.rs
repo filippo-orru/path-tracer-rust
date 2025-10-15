@@ -1,9 +1,9 @@
 use glam::Vec3;
 
-use crate::render::{Mesh, Triangle};
+use crate::render::{Mesh, Triangle, camera_data::CameraData};
 
 use super::{
-    load_off::load_off, CameraData, Material, ReflectType, SceneData, SceneObject, SceneObjectData,
+    Material, ReflectType, SceneData, SceneObject, SceneObjectData, camera_data, load_off::load_off,
 };
 
 // Helper function to create a quad (rectangle) from two triangles
@@ -93,7 +93,7 @@ pub fn load_scenes() -> Vec<SceneData> {
             position: Vec3::new(0.0, BOX_DIMENSIONS.y, 0.0),
             type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 1, true)),
             material: Material {
-                color: Vec3::new(0.75, 0.75, 0.75),
+                color: Vec3::splat(0.8),
                 emmission: Vec3::default(),
                 reflect_type: ReflectType::Diffuse,
             },
@@ -103,7 +103,7 @@ pub fn load_scenes() -> Vec<SceneData> {
             position: Vec3::new(0.0, -BOX_DIMENSIONS.y, 0.0),
             type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 1, false)),
             material: Material {
-                color: Vec3::new(0.75, 0.75, 0.75),
+                color: Vec3::splat(0.7),
                 emmission: Vec3::default(),
                 reflect_type: ReflectType::Diffuse,
             },
@@ -113,7 +113,7 @@ pub fn load_scenes() -> Vec<SceneData> {
             position: Vec3::new(0.0, 0.0, -BOX_DIMENSIONS.z),
             type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 2, false)),
             material: Material {
-                color: Vec3::new(0.75, 0.75, 0.75),
+                color: Vec3::splat(0.75),
                 emmission: Vec3::default(),
                 reflect_type: ReflectType::Diffuse,
             },
@@ -131,7 +131,7 @@ pub fn load_scenes() -> Vec<SceneData> {
         // The ceiling area light source (slightly yellowish color)
         SceneObjectData {
             position: Vec3::new(0.0, BOX_DIMENSIONS.y + 10.0 - 0.04, 0.0),
-            type_: SceneObject::Sphere { radius: 10.0 },
+            type_: SceneObject::Mesh(single_quad_mesh(WALL_SIZE, 1, true)),
             material: Material {
                 color: Vec3::new(0.98, 1.0, 0.9),
                 emmission: Vec3::new(0.98, 1.0, 0.9) * 15.0,
@@ -241,6 +241,16 @@ pub fn load_scenes() -> Vec<SceneData> {
                         reflect_type: ReflectType::Refract,
                     },
                 },
+                // emmission
+                SceneObjectData {
+                    type_: SceneObject::Sphere { radius: 0.5 },
+                    position: Vec3::new(0.08, -BOX_DIMENSIONS.y + 0.8, -0.8),
+                    material: Material {
+                        color: Vec3::splat(0.999),
+                        emmission: Vec3::new(0.98, 1.0, 0.9) * 2.0,
+                        reflect_type: ReflectType::Diffuse,
+                    },
+                },
             ]
             .into_iter()
             .chain(cornell_box.clone())
@@ -255,6 +265,7 @@ pub fn load_scenes() -> Vec<SceneData> {
                 material: Material {
                     color: Vec3::new(234.0 / 255.0, 1.0, 0.0),
                     emmission: Vec3::default(),
+                    // emmission: Vec3::new(0.98, 1.0, 0.9) * 15.0,
                     reflect_type: ReflectType::Diffuse,
                 },
             }]

@@ -1,11 +1,12 @@
 use std::cell::RefCell;
 
+use iced::Length;
 use iced::alignment::Horizontal;
-use iced::futures::channel::mpsc;
-use iced::futures::channel::oneshot;
 use iced::futures::SinkExt;
 use iced::futures::Stream;
 use iced::futures::StreamExt;
+use iced::futures::channel::mpsc;
+use iced::futures::channel::oneshot;
 use iced::stream::channel;
 use iced::widget::combo_box;
 use iced::widget::row;
@@ -13,17 +14,19 @@ use iced::widget::shader;
 use iced::widget::text_input;
 use iced::widget::{button, canvas, column, container, text};
 use iced::window::{Position, Settings};
-use iced::Length;
-use iced::{application, Color, Element, Point, Size, Subscription};
-use iced::{mouse, Rectangle, Renderer, Theme};
+use iced::{Color, Element, Point, Size, Subscription, application};
+use iced::{Rectangle, Renderer, Theme, mouse};
 
-use crate::render::gamma_correction;
-use crate::render::render;
-use crate::render::scenes::load_scenes;
 use crate::render::Image;
+use crate::render::Ray;
 use crate::render::RenderConfig;
 use crate::render::RenderUpdate;
 use crate::render::SceneData;
+use crate::render::SceneIntersectResult;
+use crate::render::gamma_correction;
+use crate::render::intersect_scene;
+use crate::render::render;
+use crate::render::scenes::load_scenes;
 use crate::viewport::ViewportProgram;
 
 mod render;
@@ -50,14 +53,14 @@ struct State {
 
     scenes: Vec<RefCell<SceneData>>,
     scene_ids_selector: combo_box::State<String>,
-    selected_scene_id: String,
     selected_scene: RefCell<SceneData>,
 
-    resolution_y: String,
-    samples_per_pixel: String,
+    resolution_y_text: String,
+    samples_text: String,
 
     config_has_error: Option<String>,
 
+    render_config: RenderConfig,
     rendering: RenderState,
     empty_image: Image,
 }
@@ -83,12 +86,16 @@ impl Default for State {
                     .collect(),
                 None, // Some(selected_scene_id.clone()).as_ref(),
             ),
-            selected_scene_id: initial_id.to_owned(),
             selected_scene: mesh.clone(),
             scenes,
-            resolution_y: "300".to_owned(),
-            samples_per_pixel: "100".to_owned(),
+            resolution_y_text: "300".to_owned(),
+            samples_text: "100".to_owned(),
             config_has_error: None,
+            render_config: RenderConfig {
+                samples_per_pixel: 100,
+                resolution_y: 300,
+                scene: mesh.borrow().clone(),
+            },
             rendering: RenderState::NotRendering,
             empty_image: Image {
                 pixels: vec![],
@@ -109,7 +116,6 @@ enum RenderState {
 #[derive(Debug, Clone)]
 enum Message {
     LinkSender(mpsc::Sender<RendererInput>),
-    ClearRender,
     StartRender,
     RenderingProgress(RenderUpdate),
     RenderingDone(Image),
@@ -120,24 +126,18 @@ enum Message {
 
 fn update(state: &mut State, message: Message) {
     match message {
-        Message::ClearRender => {
-            state.rendering = RenderState::NotRendering;
-            // if let Some(channel) = &mut state.renderer_channel {
-            //     let _ = channel.try_send(RendererInput::StopRendering);
-            // }
-        }
         Message::StartRender => {
             if let RenderState::Rendering { .. } = state.rendering {
                 return;
             }
-            if let Ok(res_y) = state.resolution_y.parse::<usize>() {
+            if let Ok(res_y) = state.resolution_y_text.parse::<usize>() {
                 if res_y == 0 || res_y > 2000 {
                     state.config_has_error =
                         Some("Resolution Y must be between 1 and 2000".to_owned());
                     return;
                 }
 
-                if let Ok(spp) = state.samples_per_pixel.parse::<usize>() {
+                if let Ok(spp) = state.samples_text.parse::<usize>() {
                     if spp == 0 || spp > 10_000 {
                         state.config_has_error =
                             Some("Samples per pixel must be between 1 and 10000".to_owned());
@@ -145,7 +145,7 @@ fn update(state: &mut State, message: Message) {
                     }
 
                     state.rendering = RenderState::Pending;
-                    let config = create_render_config(&state, spp, res_y);
+                    let config = state.render_config.clone();
                     if let Some(channel) = &mut state.renderer_channel {
                         let _ = channel.try_send(RendererInput::StartRendering { config });
                     }
@@ -168,24 +168,19 @@ fn update(state: &mut State, message: Message) {
             state.rendering = RenderState::Rendering { update };
         }
         Message::SelectScene(id) => {
-            state.selected_scene_id = id;
-            if let Some(scene) = state
-                .scenes
-                .iter()
-                .find(|s| s.borrow().id == state.selected_scene_id)
-            {
+            if let Some(scene) = state.scenes.iter().find(|s| s.borrow().id == id) {
                 state.selected_scene = scene.clone();
+                state.rendering = RenderState::NotRendering;
+            } else {
+                state.config_has_error = Some(format!("Scene with id '{}' not found", id));
             }
         }
-        Message::UpdateResolutionY(value) => state.resolution_y = value,
-        Message::UpdateSamplesPerPixel(value) => state.samples_per_pixel = value,
-    }
-}
-
-fn create_render_config(state: &State, spp: usize, res_y: usize) -> RenderConfig {
-    RenderConfig {
-        samples_per_pixel: spp,
-        resolution_y: res_y,
+        Message::UpdateResolutionY(value) => state.resolution_y_text = value,
+        Message::UpdateSamplesPerPixel(value) => state.samples_text = value,
+    };
+    state.render_config = RenderConfig {
+        samples_per_pixel: state.samples_text.parse::<usize>().unwrap_or(100),
+        resolution_y: state.resolution_y_text.parse::<usize>().unwrap_or(300),
         scene: state.selected_scene.borrow().clone(),
     }
 }
@@ -201,7 +196,7 @@ fn view(state: &State) -> Element<'_, Message> {
                             combo_box(
                                 &state.scene_ids_selector,
                                 "Select scene",
-                                Some(&state.selected_scene_id),
+                                Some(&state.selected_scene.borrow().id),
                                 Message::SelectScene
                             )
                             .width(250)
@@ -211,7 +206,7 @@ fn view(state: &State) -> Element<'_, Message> {
                     column![
                         text("Resolution Y"),
                         container(
-                            text_input("Resolution Y", &state.resolution_y.to_string())
+                            text_input("Resolution Y", &state.resolution_y_text.to_string())
                                 .on_input(Message::UpdateResolutionY)
                                 .width(250)
                         )
@@ -220,7 +215,7 @@ fn view(state: &State) -> Element<'_, Message> {
                     column![
                         text("Samples per pixel"),
                         container(
-                            text_input("Samples per pixel", &state.samples_per_pixel.to_string())
+                            text_input("Samples per pixel", &state.samples_text.to_string())
                                 .on_input(Message::UpdateSamplesPerPixel)
                                 .width(250)
                         )
@@ -236,11 +231,11 @@ fn view(state: &State) -> Element<'_, Message> {
             ]
             .spacing(10),
             shader(ViewportProgram {
-                config: create_render_config(&state, 1, 1),
+                config: &state.render_config,
                 // controls: Controls::default()
             })
-            .width(500)
-            .height(300),
+            .width(state.render_config.resolution_x() as f32)
+            .height(state.render_config.resolution_y as f32),
             {
                 let image = match &state.rendering {
                     RenderState::NotRendering | RenderState::Pending => &state.empty_image,
@@ -250,18 +245,21 @@ fn view(state: &State) -> Element<'_, Message> {
                 // let (width, height) = image.resolution;
                 // let aspect_ratio = width as f32 / height as f32;
                 container(
-                    canvas(CanvasState { image }).width(500).height(300),
-                    // .width(width as f32)
-                    // .height(height as f32),
+                    canvas(CanvasState {
+                        image,
+                        config: &state.render_config,
+                    })
+                    .width(state.render_config.resolution_x() as f32)
+                    .height(state.render_config.resolution_y as f32),
                 )
             },
             row![
-                button("Clear").on_press_maybe(match &state.rendering {
-                    RenderState::NotRendering
-                    | RenderState::Pending
-                    | RenderState::Rendering { update: _ } => None,
-                    RenderState::Done { result: _ } => Some(Message::ClearRender),
-                }),
+                // button("Clear").on_press_maybe(match &state.rendering {
+                //     RenderState::NotRendering
+                //     | RenderState::Pending
+                //     | RenderState::Rendering { update: _ } => None,
+                //     RenderState::Done { result: _ } => Some(Message::ClearRender),
+                // }),
                 button(text(match &state.rendering {
                     RenderState::NotRendering | RenderState::Done { result: _ } =>
                         "Render".to_owned(),
@@ -295,6 +293,7 @@ fn view(state: &State) -> Element<'_, Message> {
 // Canvas
 #[derive(Debug)]
 struct CanvasState<'a> {
+    config: &'a RenderConfig,
     image: &'a Image,
 }
 
@@ -311,6 +310,35 @@ impl Default for CanvasCache {
         }
     }
 }
+fn test_scene_ray(relative_position: Point, config: &RenderConfig) {
+    let sensor_origin = config.scene.camera.position;
+    let lens_center = config.scene.camera.lens_center();
+
+    let sx: f32 = 1.0 - relative_position.x * 2.0;
+    let sy: f32 = relative_position.y * 2.0 - 1.0;
+
+    let (su, sv) = config.scene.camera.orthogonals();
+
+    // 3d sample position on sensor
+    let sensor_pos = sensor_origin + su * sx + sv * sy;
+    let ray_direction = (lens_center - sensor_pos).normalize();
+    // ray through pinhole
+    let ray = Ray {
+        origin: lens_center,
+        direction: ray_direction,
+    };
+    match intersect_scene(&ray, &config.scene.objects) {
+        SceneIntersectResult::Hit { object_id, hit } => {
+            println!(
+                "Hit {:?} object at distance {}",
+                config.scene.objects[object_id].material, hit.distance
+            );
+        }
+        SceneIntersectResult::NoHit => {
+            println!("No hit");
+        }
+    }
+}
 
 impl<Message> canvas::Program<Message> for CanvasState<'_> {
     type State = CanvasCache;
@@ -319,13 +347,27 @@ impl<Message> canvas::Program<Message> for CanvasState<'_> {
         &self,
         _state: &mut Self::State,
         event: canvas::Event,
-        _bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
     ) -> (canvas::event::Status, Option<Message>) {
         match event {
-            canvas::Event::Mouse(_) => (),
-            canvas::Event::Touch(_) => (),
-            canvas::Event::Keyboard(_) => (),
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let position = cursor.position().unwrap();
+                if bounds.contains(position) {
+                    let relative_position = Point {
+                        x: (position.x - bounds.x) / bounds.width,
+                        y: (position.y - bounds.y) / bounds.height,
+                    };
+                    // println!(
+                    //     "Canvas clicked, {} {}",
+                    //     relative_position.x, relative_position.y
+                    // );
+                    test_scene_ray(relative_position, &self.config);
+
+                    return (canvas::event::Status::Captured, None);
+                }
+            }
+            _ => (),
         }
 
         (canvas::event::Status::Ignored, None)

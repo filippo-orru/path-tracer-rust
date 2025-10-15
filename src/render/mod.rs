@@ -10,16 +10,18 @@ use std::{
     hash::{Hash, Hasher},
     io::Write,
     process::exit,
-    sync::{atomic, mpsc, Arc},
+    sync::{Arc, atomic, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
 use glam::Vec3;
-use iced::futures::{self, channel::mpsc::SendError, Sink, SinkExt};
+use iced::futures::{self, Sink, SinkExt, channel::mpsc::SendError};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use scenes::load_scenes;
+
+use crate::render::camera_data::CameraData;
 
 const USE_CULLING: bool = false;
 const PI: f32 = 3.141592653589793;
@@ -58,9 +60,9 @@ pub fn to_int_with_gamma_correction(x: f32) -> usize {
     return (255.0 * gamma_correction(x) + 0.5) as usize;
 }
 
-struct Ray {
-    origin: Vec3,
-    direction: Vec3,
+pub struct Ray {
+    pub origin: Vec3,
+    pub direction: Vec3,
 }
 
 #[derive(Clone, Debug)]
@@ -84,24 +86,67 @@ pub struct SceneData {
     pub camera: CameraData,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct CameraData {
-    pub position: Vec3,
-    /// normal to sensor plane
-    pub direction: Vec3,
-    /// in meters
-    pub focal_length: f32,
-    /// in meters
-    pub sensor_width: f32,
+impl Display for SceneData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.id)
+    }
 }
 
-impl CameraData {
-    fn new(position: Vec3, direction: Vec3) -> Self {
-        Self {
-            position,
-            direction,
-            focal_length: 0.035,
-            sensor_width: 0.036,
+pub mod camera_data {
+    use glam::Vec3;
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct CameraData {
+        pub position: Vec3,
+        /// normal to sensor plane
+        direction: Vec3,
+        /// in meters
+        pub focal_length: f32,
+        /// in meters
+        pub sensor_width: f32,
+
+        pub aspect_ratio: f32,
+    }
+    impl CameraData {
+        pub fn new(position: Vec3, direction: Vec3) -> Self {
+            Self {
+                position,
+                direction: direction.normalize(),
+                focal_length: 0.035,
+                sensor_width: 0.036,
+                aspect_ratio: 3.0 / 2.0,
+            }
+        }
+
+        pub fn direction(&self) -> Vec3 {
+            self.direction
+        }
+
+        pub fn set_direction(&mut self, direction: Vec3) {
+            self.direction = direction.normalize();
+        }
+
+        pub fn sensor_height(&self) -> f32 {
+            self.sensor_width / self.aspect_ratio
+        }
+
+        /// lens center (pinhole)
+        pub fn lens_center(&self) -> Vec3 {
+            self.position + self.direction * self.focal_length
+        }
+
+        /// Returns (su, sv), two orthogonal vectors spanning the sensor plane, scaled by the sensor dimensions.
+        pub fn orthogonals(&self) -> (Vec3, Vec3) {
+            let su = self
+                .direction
+                .cross(if self.direction.y.abs() < 0.9 {
+                    Vec3::new(0.0, 1.0, 0.0)
+                } else {
+                    Vec3::new(0.0, 0.0, 1.0)
+                })
+                .normalize();
+            let sv = su.cross(self.direction);
+            return (su * self.sensor_width, sv * self.sensor_height());
         }
     }
 }
@@ -118,58 +163,86 @@ impl SceneObjectData {
         return match &self.type_ {
             SceneObject::Sphere { radius } => intersect_sphere(self.position, *radius, ray),
 
-            SceneObject::Mesh(mesh) => match intersect_sphere(
-                mesh.bounding_sphere.position + self.position,
-                mesh.bounding_sphere.radius,
-                ray,
-            ) {
-                IntersectResult::NoHit => IntersectResult::NoHit,
-                IntersectResult::Hit(_) => {
-                    // println!("Mesh intersection test");
-                    for original_tri in mesh.triangles.iter() {
-                        let tri = original_tri.transformed(&self.position);
-                        let va_vb = tri.b - tri.a;
-                        let va_vc = tri.c - tri.a;
+            SceneObject::Mesh(mesh) =>
+            // {
+            {
+                match intersect_sphere(
+                    mesh.bounding_sphere.position + self.position,
+                    mesh.bounding_sphere.radius,
+                    ray,
+                ) {
+                    IntersectResult::NoHit => IntersectResult::NoHit,
+                    IntersectResult::Hit(_) => {
+                        // println!("Mesh intersection test");
 
-                        let pvec = ray.direction.cross(va_vc);
-                        let determinant = va_vb.dot(pvec);
+                        // Initialize variables to track closest hit
+                        let mut closest_hit: Option<Hit> = None;
 
-                        if USE_CULLING {
-                            if determinant < 1e-4 {
+                        for original_tri in mesh.triangles.iter() {
+                            let tri = original_tri.transformed(&self.position);
+                            let va_vb = tri.b - tri.a;
+                            let va_vc = tri.c - tri.a;
+
+                            let pvec = ray.direction.cross(va_vc);
+                            let determinant = va_vb.dot(pvec);
+
+                            if USE_CULLING {
+                                if determinant < 1e-4 {
+                                    continue;
+                                }
+                            } else {
+                                if determinant.abs() < 1e-4 {
+                                    continue;
+                                }
+                            }
+
+                            let inv_determinant = 1.0 / determinant;
+                            let tvec = ray.origin - tri.a;
+                            let u: f32 = tvec.dot(pvec) * inv_determinant;
+                            if u < 0.0 || u > 1.0 {
                                 continue;
                             }
-                        } else {
-                            if determinant.abs() < 1e-4 {
+
+                            let qvec = tvec.cross(va_vb);
+                            let v: f32 = ray.direction.dot(qvec) * inv_determinant;
+                            if v < 0.0 || (u + v) > 1.0 {
                                 continue;
+                            }
+
+                            let distance: f32 = va_vc.dot(qvec) * inv_determinant;
+
+                            // Skip negative distances (hits behind the ray origin)
+                            if distance <= 0.0 {
+                                continue;
+                            }
+
+                            // Only update if this hit is closer than the previous closest
+                            let is_closest_hit = match &closest_hit {
+                                Some(hit) => distance < hit.distance,
+                                None => true,
+                            };
+
+                            if is_closest_hit {
+                                // Calculate proper intersection point using ray equation
+                                let intersection = ray.origin + ray.direction * distance;
+                                let normal = va_vb.cross(va_vc).normalize();
+
+                                closest_hit = Some(Hit {
+                                    distance,
+                                    intersection,
+                                    normal,
+                                });
                             }
                         }
 
-                        let inv_determinant = 1.0 / determinant;
-                        let tvec = ray.origin - tri.a;
-                        let u: f32 = tvec.dot(pvec) * inv_determinant;
-                        if u < 0.0 || u > 1.0 {
-                            continue;
+                        // Return the closest hit, or NoHit if none was found
+                        match closest_hit {
+                            Some(hit) => IntersectResult::Hit(hit),
+                            None => IntersectResult::NoHit,
                         }
-
-                        let qvec = tvec.cross(va_vb);
-                        let v: f32 = ray.direction.dot(qvec) * inv_determinant;
-                        if v < 0.0 || (u + v) > 1.0 {
-                            continue;
-                        }
-
-                        let distance: f32 = va_vb.dot(qvec) * inv_determinant;
-                        let intersection = ray.direction * distance;
-                        let normal = va_vb.cross(va_vc).normalize();
-
-                        return IntersectResult::Hit(Hit {
-                            distance,
-                            intersection,
-                            normal,
-                        });
                     }
-                    return IntersectResult::NoHit;
                 }
-            },
+            }
         };
     }
 
@@ -331,7 +404,7 @@ fn intersect_sphere(position: Vec3, radius: f32, ray: &Ray) -> IntersectResult {
 }
 
 #[derive(Clone, Debug)]
-struct Mesh {
+pub(crate) struct Mesh {
     triangles: Vec<Triangle>,
     bounding_sphere: StandaloneSphere,
 }
@@ -404,8 +477,8 @@ impl Triangle {
 }
 
 #[derive(PartialEq, Debug)]
-struct Hit {
-    distance: f32,
+pub struct Hit {
+    pub distance: f32,
     intersection: Vec3,
     normal: Vec3,
 }
@@ -416,12 +489,12 @@ enum IntersectResult {
 }
 
 #[derive(PartialEq, Debug)]
-enum SceneIntersectResult {
+pub enum SceneIntersectResult {
     NoHit,
     Hit { object_id: usize, hit: Hit },
 }
 
-fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObjectData>) -> SceneIntersectResult {
+pub fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObjectData>) -> SceneIntersectResult {
     let mut min_intersect: SceneIntersectResult = SceneIntersectResult::NoHit;
 
     for i in (0..scene_objects.len()).rev() {
@@ -581,6 +654,7 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Ve
     };
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct RenderConfig {
     pub samples_per_pixel: usize,
     pub resolution_y: usize,
@@ -595,6 +669,12 @@ impl Default for RenderConfig {
             resolution_y: 300,
             scene: scenes.into_iter().next().unwrap(),
         }
+    }
+}
+
+impl RenderConfig {
+    pub fn resolution_x(&self) -> usize {
+        self.resolution_y * 3 / 2
     }
 }
 
@@ -730,7 +810,7 @@ pub fn render(
 ) -> Image {
     let image = thread::scope(move |s| {
         let resy = render_config.resolution_y;
-        let resx: usize = resy * 3 / 2;
+        let resx: usize = render_config.resolution_x();
 
         let scene = render_config.scene;
         let time_start = Instant::now();
@@ -738,22 +818,8 @@ pub fn render(
 
         //-- setup sensor
         let sensor_origin: Vec3 = scene.camera.position;
-        let sensor_view_direction: Vec3 = scene.camera.direction.normalize();
-        let sensor_width: f32 = scene.camera.sensor_width;
-        let sensor_height: f32 = sensor_width * 2.0 / 3.0;
-        let focal_length: f32 = scene.camera.focal_length;
-        // lens center (pinhole)
-        let lens_center = sensor_origin + sensor_view_direction * focal_length;
-
-        //-- orthogonal axes spanning the sensor plane
-        let su: Vec3 = sensor_view_direction
-            .cross(if sensor_view_direction.y.abs() < 0.9 {
-                Vec3::new(0.0, 1.0, 0.0)
-            } else {
-                Vec3::new(0.0, 0.0, 1.0)
-            })
-            .normalize();
-        let sv: Vec3 = su.cross(sensor_view_direction);
+        let lens_center = scene.camera.lens_center();
+        let (su, sv) = scene.camera.orthogonals();
 
         let grid_size = resx * resy;
 
@@ -779,18 +845,20 @@ pub fn render(
         // Start thread that sends regular progress updates
         let (stop_background_thread, should_stop) = mpsc::channel();
         let resolution = (resx.clone(), resy.clone());
-        s.spawn(move || loop {
-            let mut send_update_progress = send_update_progress.clone();
-            let processed_percentage = get_processed_pixel_count.load(atomic::Ordering::Relaxed)
-                as f64
-                / (grid_size) as f64;
-            let _ = futures::executor::block_on(send_update_progress.send(RenderUpdate {
-                progress: processed_percentage,
-                image: Image::new(get_pixels.lock().unwrap().clone(), resolution),
-            }));
-            thread::sleep(Duration::from_millis(500));
-            if let Ok(_) = should_stop.try_recv() {
-                break;
+        s.spawn(move || {
+            loop {
+                let mut send_update_progress = send_update_progress.clone();
+                let processed_percentage = get_processed_pixel_count.load(atomic::Ordering::Relaxed)
+                    as f64
+                    / (grid_size) as f64;
+                let _ = futures::executor::block_on(send_update_progress.send(RenderUpdate {
+                    progress: processed_percentage,
+                    image: Image::new(get_pixels.lock().unwrap().clone(), resolution),
+                }));
+                thread::sleep(Duration::from_millis(500));
+                if let Ok(_) = should_stop.try_recv() {
+                    break;
+                }
             }
         });
 
@@ -823,10 +891,8 @@ pub fn render(
                     };
 
                     // x and y sample position on sensor plane
-                    let sx: f32 = ((x as f32 + 0.5 * (0.5 + xsub + xfilter)) / resx as f32 - 0.5)
-                        * sensor_width;
-                    let sy: f32 = ((y as f32 + 0.5 * (0.5 + ysub + yfilter)) / resy as f32 - 0.5)
-                        * sensor_height;
+                    let sx: f32 = (x as f32 + 0.5 * (0.5 + xsub + xfilter)) / resx as f32 - 0.5;
+                    let sy: f32 = (y as f32 + 0.5 * (0.5 + ysub + yfilter)) / resy as f32 - 0.5;
 
                     // 3d sample position on sensor
                     let sensor_pos = sensor_origin + su * sx + sv * sy;

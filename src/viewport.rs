@@ -1,21 +1,15 @@
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Vec3};
 use iced::{
+    Rectangle,
     advanced::Shell,
     event, mouse,
     widget::shader::{
-        self,
+        self, Primitive,
         wgpu::{self},
-        Primitive,
     },
-    Rectangle,
 };
 
-use crate::render::{CameraData, RenderConfig, Triangle};
-
-pub struct ViewportProgram {
-    pub config: RenderConfig,
-    // pub controls: Controls,
-}
+use crate::render::{RenderConfig, Triangle, camera_data::CameraData};
 
 #[derive(Debug)]
 pub struct ViewportPrimitive {
@@ -63,7 +57,7 @@ impl Primitive for ViewportPrimitive {
         queue: &shader::wgpu::Queue,
         format: shader::wgpu::TextureFormat,
         storage: &mut shader::Storage,
-        target_size: &iced::Rectangle,
+        _target_size: &iced::Rectangle,
         viewport: &shader::Viewport,
     ) {
         // Check if viewport size changed
@@ -87,25 +81,27 @@ impl Primitive for ViewportPrimitive {
         // Create view matrix from camera
 
         let sensor_origin: Vec3 = self.camera.position;
-        let sensor_view_direction: Vec3 = self.camera.direction.normalize();
-        let sensor_width: f32 = self.camera.sensor_width;
-        let sensor_height: f32 = self.camera.sensor_height;
+        let sensor_height: f32 = self.camera.sensor_height();
         let focal_length: f32 = self.camera.focal_length;
-        // lens center (pinhole)
-        let lens_center = sensor_origin + sensor_view_direction * focal_length;
-
         // Create a "look-at" target point from the camera position and direction
-        let target = lens_center + sensor_view_direction;
+        let lens_center = self.camera.lens_center();
 
-        // Assuming Y is up in your world space
         let up = Vec3::new(0.0, 1.0, 0.0);
 
         // Create view matrix
-        let view = Mat4::look_at_rh(sensor_origin, target, up);
-        let fov = 2.0 * (sensor_width / (2.0 * focal_length)).atan();
+        let view = Mat4::look_at_rh(sensor_origin, lens_center, up);
 
-        let aspect_ratio = target_size.width / target_size.height;
-        // Using right-handed coordinate system for consistency
+        // Calculate FOV based on sensor height and focal length
+        let fov = 2.0 * (sensor_height / (2.0 * focal_length)).atan();
+
+        // Debug info to compare with the fixed value
+        // println!(
+        //     "Calculated FOV: {:.3} radians ({:.1} degrees)",
+        //     fov,
+        //     fov.to_degrees()
+        // );
+
+        let aspect_ratio = self.camera.aspect_ratio;
         let projection = Mat4::perspective_rh(fov, aspect_ratio, 0.001, 1000.0);
 
         // Combine view and projection matrices
@@ -335,14 +331,19 @@ impl FragmentShaderPipeline {
 #[derive(Default)]
 pub struct ViewportState {}
 
-impl<Message> shader::Program<Message> for ViewportProgram {
+pub struct ViewportProgram<'a> {
+    pub config: &'a RenderConfig,
+    // pub controls: Controls,
+}
+
+impl<Message> shader::Program<Message> for ViewportProgram<'_> {
     type State = ViewportState;
 
     type Primitive = ViewportPrimitive;
 
     fn draw(
         &self,
-        state: &Self::State,
+        _state: &Self::State,
         _cursor: mouse::Cursor,
         _bounds: iced::Rectangle,
     ) -> Self::Primitive {
@@ -368,14 +369,14 @@ impl<Message> shader::Program<Message> for ViewportProgram {
 
     fn update(
         &self,
-        state: &mut Self::State,
+        _state: &mut Self::State,
         event: shader::Event,
-        bounds: Rectangle,
+        _bounds: Rectangle,
         _cursor: mouse::Cursor,
         _shell: &mut Shell<'_, Message>,
     ) -> (event::Status, Option<Message>) {
         match event {
-            shader::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            shader::Event::Mouse(mouse::Event::CursorMoved { position: _ }) => {
                 // state.offset = Vec2::new(
                 //     ((position.x - bounds.x) / bounds.width) * 2.0 - 1.0,
                 //     -(((position.y - bounds.y) / bounds.height) * 2.0 - 1.0),
