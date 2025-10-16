@@ -1,5 +1,6 @@
 use async_std::task;
-use iced::advanced::graphics::image;
+use iced::Alignment;
+use iced::widget::text;
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic;
@@ -7,7 +8,6 @@ use std::sync::atomic::AtomicBool;
 
 use iced::Element;
 use iced::Length;
-use iced::alignment::Horizontal;
 use iced::futures;
 use iced::futures::SinkExt;
 use iced::futures::Stream;
@@ -16,32 +16,29 @@ use iced::futures::channel::mpsc;
 use iced::stream::channel;
 use iced::widget::combo_box;
 use iced::widget::row;
-use iced::widget::text_input;
-use iced::widget::{button, canvas, column, container, text};
+use iced::widget::{button, column, container};
 use iced::window::{Position, Settings};
-use iced::{Color, Point, Size, Subscription, application};
-use iced::{Rectangle, Renderer, Theme, mouse};
+use iced::{Point, Size, Subscription, application};
 
 use crate::render::Image;
-use crate::render::Ray;
 use crate::render::RenderConfig;
 use crate::render::RenderUpdate;
 use crate::render::SceneData;
-use crate::render::SceneIntersectResult;
-use crate::render::gamma_correction;
-use crate::render::intersect_scene;
 use crate::render::render;
 use crate::render::scenes::load_scenes;
+use crate::render_tab::render_tab;
 use crate::viewport::ViewportMessage;
-use crate::viewport::ViewportProgram;
+use crate::viewport_tab::viewport_tab;
 
 mod render;
+mod render_tab;
 mod viewport;
+mod viewport_tab;
 
 fn main() -> iced::Result {
-    let application = application("A cool counter", update, view);
+    let application = application("Renderer", update, view);
     let settings = Settings {
-        size: Size::new(950.0, 1027.0),
+        size: Size::new(1028.0 * 16.0 / 10.0 - 300.0, 1028.0),
         position: Position::SpecificWith(|window, display| Point {
             x: display.width - window.width,
             y: 0.0,
@@ -69,6 +66,8 @@ struct State {
     render_config: RenderConfig,
     rendering: RenderState,
     empty_image: Image,
+
+    tab: Tab,
 }
 
 impl Default for State {
@@ -99,6 +98,7 @@ impl Default for State {
                 resolution: (0, 0),
                 hash: 0,
             },
+            tab: Tab::Viewport,
         }
     }
 }
@@ -117,11 +117,18 @@ enum RenderState {
 enum Message {
     StartRender,
     StopRender,
+    SwitchTab(Tab),
     RenderWorkerMessage(RenderWorkerMessage),
     SelectScene(String),
     UpdateResolutionY(String),
     UpdateSamplesPerPixel(String),
     ViewportMessage(ViewportMessage),
+}
+
+#[derive(Debug, Clone)]
+enum Tab {
+    Viewport,
+    Render,
 }
 
 fn update(state: &mut State, message: Message) {
@@ -210,7 +217,6 @@ fn update(state: &mut State, message: Message) {
                 }
             }
         }
-
         Message::RenderWorkerMessage(render_msg) => match render_msg {
             RenderWorkerMessage::RenderingDone(image) => state.rendering = RenderState::Done(image),
             RenderWorkerMessage::LinkSender(sender) => state.renderer_channel = Some(sender),
@@ -221,248 +227,70 @@ fn update(state: &mut State, message: Message) {
                 }
             }
         },
+        Message::SwitchTab(tab) => state.tab = tab,
     };
 }
 
 fn view(state: &State) -> Element<'_, Message> {
     return container(
         column![
-            column![
-                row![
-                    column![
-                        text("Scene"),
-                        container(
-                            combo_box(
-                                &state.scene_ids_selector,
-                                "Select scene",
-                                Some(&state.selected_scene.id),
-                                Message::SelectScene
-                            )
-                            .width(250)
-                        )
-                    ]
-                    .spacing(2),
-                    column![
-                        text("Resolution Y"),
-                        container(
-                            text_input("Resolution Y", &state.resolution_y_text.to_string())
-                                .on_input(Message::UpdateResolutionY)
-                                .width(250)
-                        )
-                    ]
-                    .spacing(2),
-                    column![
-                        text("Samples per pixel"),
-                        container(
-                            text_input("Samples per pixel", &state.samples_text.to_string())
-                                .on_input(Message::UpdateSamplesPerPixel)
-                                .width(250)
-                        )
-                    ]
-                    .spacing(2),
-                ]
-                .spacing(10),
-                if let Some(err) = &state.config_has_error {
-                    text(err).color(Color::from_rgb(1.0, 0.0, 0.0))
-                } else {
-                    text("")
-                },
-            ]
-            .spacing(10),
-            ViewportProgram::view(&state.render_config).map(Message::ViewportMessage),
-            {
-                let image = match &state.rendering {
-                    RenderState::NotRendering | RenderState::Pending => &state.empty_image,
-                    RenderState::Rendering { update, .. } => &update.image,
-                    RenderState::Done(image) => &image,
-                };
-                // let (width, height) = image.resolution;
-                // let aspect_ratio = width as f32 / height as f32;
-                container(
-                    canvas(CanvasState {
-                        image,
-                        config: &state.render_config,
-                    })
-                    .width(state.render_config.resolution_x() as f32)
-                    .height(state.render_config.resolution_y as f32),
-                )
-            },
             row![
-                button("Stop").on_press_maybe(match &state.rendering {
-                    RenderState::NotRendering | RenderState::Pending | RenderState::Done(_) => None,
-                    RenderState::Rendering { .. } => Some(Message::StopRender),
-                }),
-                button(text(match &state.rendering {
-                    RenderState::NotRendering | RenderState::Done(_) => "Render".to_owned(),
-                    RenderState::Pending | RenderState::Rendering { .. } =>
-                        "Rendering...".to_owned(),
-                }))
-                .on_press_maybe(match &state.rendering {
-                    RenderState::NotRendering | RenderState::Done(_) => Some(Message::StartRender),
-                    RenderState::Pending | RenderState::Rendering { .. } => None,
-                }),
-                text(match &state.rendering {
-                    RenderState::NotRendering => "".to_owned(),
-                    RenderState::Pending => "...".to_owned(),
-                    RenderState::Rendering { update, stopping } =>
-                        if *stopping {
-                            "Stopping...".to_owned()
+                row![
+                    button("Viewport")
+                        .style(if matches!(state.tab, Tab::Viewport) {
+                            button::primary
                         } else {
-                            format!("{:.2}%", update.progress * 100.0)
-                        },
-                    RenderState::Done(image) =>
-                        format!("Done! ({}x{})", image.resolution.0, image.resolution.1),
-                }),
+                            button::secondary
+                        })
+                        .padding([2, 4])
+                        .on_press(Message::SwitchTab(Tab::Viewport)),
+                    button("Render")
+                        .style(if matches!(state.tab, Tab::Render) {
+                            button::primary
+                        } else {
+                            button::secondary
+                        })
+                        .padding([2, 4])
+                        .on_press(Message::SwitchTab(Tab::Render)),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+                container(
+                    row![
+                        text("Scene"),
+                        combo_box(
+                            &state.scene_ids_selector,
+                            "Select scene",
+                            Some(&state.selected_scene.id),
+                            Message::SelectScene
+                        )
+                        .width(120),
+                    ]
+                    .align_y(Alignment::Center)
+                    .spacing(4)
+                )
+                .width(Length::Fill),
             ]
-            .align_y(iced::Alignment::Center)
-            .spacing(10),
+            .spacing(24)
+            .align_y(Alignment::Center)
+            .padding([2, 4]),
+            container(match state.tab {
+                Tab::Viewport => {
+                    viewport_tab(state)
+                }
+                Tab::Render => {
+                    render_tab(state)
+                }
+            },)
+            .width(Length::Fill)
+            .height(Length::Fill)
         ]
-        .spacing(10)
-        .align_x(Horizontal::Center),
+        .spacing(8),
     )
-    .padding(20)
-    .center(Length::Fill)
+    .padding(6)
+    .width(Length::Fill)
+    .height(Length::Fill)
     .into();
-}
-
-// Canvas
-#[derive(Debug)]
-struct CanvasState<'a> {
-    config: &'a RenderConfig,
-    image: &'a Image,
-}
-
-struct CanvasCache {
-    cache: canvas::Cache,
-    last_hash: RefCell<u64>,
-}
-
-impl Default for CanvasCache {
-    fn default() -> Self {
-        Self {
-            cache: canvas::Cache::new(),
-            last_hash: RefCell::new(0),
-        }
-    }
-}
-fn test_scene_ray(relative_position: Point, config: &RenderConfig) {
-    let sensor_origin = config.scene.camera.position;
-    let lens_center = config.scene.camera.lens_center();
-
-    let sx: f32 = 1.0 - relative_position.x * 2.0;
-    let sy: f32 = relative_position.y * 2.0 - 1.0;
-
-    let (su, sv) = config.scene.camera.orthogonals();
-
-    // 3d sample position on sensor
-    let sensor_pos = sensor_origin + su * sx + sv * sy;
-    let ray_direction = (lens_center - sensor_pos).normalize();
-    // ray through pinhole
-    let ray = Ray {
-        origin: lens_center,
-        direction: ray_direction,
-    };
-    match intersect_scene(&ray, &config.scene.objects) {
-        SceneIntersectResult::Hit { object_id, hit } => {
-            println!(
-                "Hit {:?} object at distance {}",
-                config.scene.objects[object_id].material, hit.distance
-            );
-        }
-        SceneIntersectResult::NoHit => {
-            println!("No hit");
-        }
-    }
-}
-
-impl<Message> canvas::Program<Message> for CanvasState<'_> {
-    type State = CanvasCache;
-
-    fn update(
-        &self,
-        _state: &mut Self::State,
-        event: canvas::Event,
-        bounds: Rectangle,
-        cursor: mouse::Cursor,
-    ) -> (canvas::event::Status, Option<Message>) {
-        match event {
-            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let position = cursor.position().unwrap();
-                if bounds.contains(position) {
-                    let relative_position = Point {
-                        x: (position.x - bounds.x) / bounds.width,
-                        y: (position.y - bounds.y) / bounds.height,
-                    };
-                    // println!(
-                    //     "Canvas clicked, {} {}",
-                    //     relative_position.x, relative_position.y
-                    // );
-                    test_scene_ray(relative_position, &self.config);
-
-                    return (canvas::event::Status::Captured, None);
-                }
-            }
-            _ => (),
-        }
-
-        (canvas::event::Status::Ignored, None)
-    }
-
-    fn draw(
-        &self,
-        state: &CanvasCache,
-        renderer: &Renderer,
-        _theme: &Theme,
-        bounds: Rectangle,
-        _cursor: mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        if self.image.hash != state.last_hash.borrow().clone() {
-            // println!(
-            //     "Canvas hash: {} != {}",
-            //     self.image.hash,
-            //     state.last_hash.borrow()
-            // );
-            *state.last_hash.borrow_mut() = self.image.hash;
-            state.cache.clear();
-            // println!("Canvas data changed, clearing cache");
-        }
-
-        let geometry = state.cache.draw(renderer, bounds.size(), |frame| {
-            // background
-            frame.fill_rectangle(
-                Point { x: 0.0, y: 0.0 },
-                bounds.size(),
-                Color::from_rgb(0.0, 0.0, 0.0),
-            );
-
-            let (resx, resy) = self.image.resolution;
-            let scale_x = bounds.width / resx as f32;
-            let scale_y = bounds.height / resy as f32;
-
-            for y in 0..resy {
-                for x in 0..resx {
-                    let color = self.image.pixels[(resy - y) * resx - x - 1];
-                    let red = gamma_correction(color.x);
-                    let green = gamma_correction(color.y);
-                    let blue = gamma_correction(color.z);
-                    // println!("Pixel ({}, {}) = ({}, {}, {})", x, y, red, green, blue);
-                    frame.fill_rectangle(
-                        Point {
-                            x: x as f32 * scale_x,
-                            y: y as f32 * scale_y,
-                        },
-                        Size {
-                            width: scale_x + 1.0,
-                            height: scale_y + 1.0,
-                        },
-                        Color::from_rgb(red as f32, green as f32, blue as f32),
-                    );
-                }
-            }
-        });
-
-        vec![geometry]
-    }
 }
 
 enum RendererInput {

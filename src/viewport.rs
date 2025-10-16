@@ -1,6 +1,6 @@
 use glam::{Mat4, Vec3};
 use iced::{
-    Element, Point, Rectangle,
+    Element, Length, Point, Rectangle,
     advanced::Shell,
     event,
     mouse::{self, Button},
@@ -61,7 +61,7 @@ impl Primitive for ViewportPrimitive {
         queue: &shader::wgpu::Queue,
         format: shader::wgpu::TextureFormat,
         storage: &mut shader::Storage,
-        _target_size: &iced::Rectangle,
+        target_size: &iced::Rectangle,
         viewport: &shader::Viewport,
     ) {
         // Check if viewport size changed
@@ -106,7 +106,7 @@ impl Primitive for ViewportPrimitive {
         //     fov.to_degrees()
         // );
 
-        let aspect_ratio = self.camera.aspect_ratio;
+        let aspect_ratio = target_size.width as f32 / target_size.height as f32;
         let projection = Mat4::perspective_rh(fov, aspect_ratio, 0.001, 1000.0);
 
         // Combine view and projection matrices
@@ -345,8 +345,8 @@ pub struct ViewportProgram<'a> {
 impl ViewportProgram<'_> {
     pub fn view(config: &'_ RenderConfig) -> Element<'_, ViewportMessage> {
         widget::shader(ViewportProgram { config: &config })
-            .width(config.resolution_x() as f32)
-            .height(config.resolution_y as f32)
+            .width(Length::Fill)
+            .height(Length::Fill)
             .into()
     }
 }
@@ -413,7 +413,10 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
             shader::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 if let Some(start) = state.cursor_move_start {
                     let delta = position - start;
-                    let sensitivity = 5.0 / self.config.resolution_y as f32; // Adjust sensitivity as needed
+
+                    const PAN_SENSITIVITY: f32 = 1.0;
+
+                    let sensitivity = PAN_SENSITIVITY / self.config.resolution_y as f32;
                     let yaw = -delta.x * sensitivity;
                     let pitch = -delta.y * sensitivity;
 
@@ -438,6 +441,7 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                     );
                 }
             }
+            // shader::Event::Mouse(mouse::Event::CursorMoved { position }) => {
             _ => {}
         }
 

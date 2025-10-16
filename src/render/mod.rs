@@ -5,7 +5,6 @@ pub mod scenes;
 mod test;
 
 use std::{
-    cell::RefCell,
     collections::hash_map::DefaultHasher,
     fmt::Display,
     hash::{Hash, Hasher},
@@ -19,10 +18,7 @@ use std::{
 };
 
 use glam::Vec3;
-use iced::futures::{
-    self, Sink, SinkExt,
-    channel::{mpsc::SendError, oneshot},
-};
+use iced::futures::{self, Sink, SinkExt, channel::mpsc::SendError};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use scenes::load_scenes;
@@ -699,7 +695,7 @@ impl RenderConfig {
 
 #[derive(Debug, Clone)]
 pub struct RenderUpdate {
-    pub progress: f64,
+    pub progress: f32,
     pub image: Image,
 }
 
@@ -775,7 +771,6 @@ pub fn render(
         let processed_pixel_count = Arc::new(atomic::AtomicUsize::new(0));
         let get_processed_pixel_count = processed_pixel_count.clone();
 
-        // TODO use better concurrent vec
         let pixels = Arc::new(std::sync::Mutex::new(vec![Vec3::default(); grid_size]));
         let get_pixels = pixels.clone();
 
@@ -808,8 +803,8 @@ pub fn render(
                 }
 
                 let processed_percentage = get_processed_pixel_count.load(atomic::Ordering::Relaxed)
-                    as f64
-                    / (grid_size) as f64;
+                    as f32
+                    / (grid_size) as f32;
                 let _ = futures::executor::block_on(send_update_progress.send(RenderUpdate {
                     progress: processed_percentage,
                     image: Image::new(get_pixels.lock().unwrap().clone(), resolution),
