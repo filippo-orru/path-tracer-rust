@@ -1,8 +1,11 @@
 use async_std::task;
-use iced::futures::future::JoinAll;
+use iced::advanced::graphics::image;
 use std::cell::RefCell;
-use std::thread;
+use std::sync::Arc;
+use std::sync::atomic;
+use std::sync::atomic::AtomicBool;
 
+use iced::Element;
 use iced::Length;
 use iced::alignment::Horizontal;
 use iced::futures;
@@ -10,16 +13,13 @@ use iced::futures::SinkExt;
 use iced::futures::Stream;
 use iced::futures::StreamExt;
 use iced::futures::channel::mpsc;
-use iced::futures::channel::oneshot;
-use iced::futures::channel::oneshot::Sender;
 use iced::stream::channel;
 use iced::widget::combo_box;
 use iced::widget::row;
-use iced::widget::shader;
 use iced::widget::text_input;
 use iced::widget::{button, canvas, column, container, text};
 use iced::window::{Position, Settings};
-use iced::{Color, Element, Point, Size, Subscription, application};
+use iced::{Color, Point, Size, Subscription, application};
 use iced::{Rectangle, Renderer, Theme, mouse};
 
 use crate::render::Image;
@@ -32,6 +32,7 @@ use crate::render::gamma_correction;
 use crate::render::intersect_scene;
 use crate::render::render;
 use crate::render::scenes::load_scenes;
+use crate::viewport::ViewportMessage;
 use crate::viewport::ViewportProgram;
 
 mod render;
@@ -56,9 +57,9 @@ fn main() -> iced::Result {
 struct State {
     renderer_channel: Option<mpsc::Sender<RendererInput>>,
 
-    scenes: Vec<RefCell<SceneData>>,
+    scenes: Vec<SceneData>,
     scene_ids_selector: combo_box::State<String>,
-    selected_scene: RefCell<SceneData>,
+    selected_scene: Arc<SceneData>,
 
     resolution_y_text: String,
     samples_text: String,
@@ -72,26 +73,17 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let scenes = load_scenes()
-            .into_iter()
-            .map(RefCell::new)
-            .collect::<Vec<_>>();
+        let scenes = load_scenes();
         let initial_id = "mesh";
-        let mesh = scenes
-            .iter()
-            .find(|s| s.borrow().id == initial_id)
-            .unwrap()
-            .clone();
+        let mesh = scenes.iter().find(|s| s.id == initial_id).unwrap().clone();
+        let selected_scene = Arc::new(mesh.clone());
         Self {
             renderer_channel: None,
             scene_ids_selector: combo_box::State::with_selection(
-                scenes
-                    .iter()
-                    .map(|scene| (*scene.borrow()).id.clone())
-                    .collect(),
+                scenes.iter().map(|scene| scene.id.clone()).collect(),
                 None, // Some(selected_scene_id.clone()).as_ref(),
             ),
-            selected_scene: mesh.clone(),
+            selected_scene,
             scenes,
             resolution_y_text: "300".to_owned(),
             samples_text: "100".to_owned(),
@@ -99,7 +91,7 @@ impl Default for State {
             render_config: RenderConfig {
                 samples_per_pixel: 100,
                 resolution_y: 300,
-                scene: mesh.borrow().clone(),
+                scene: mesh.clone(),
             },
             rendering: RenderState::NotRendering,
             empty_image: Image {
@@ -114,24 +106,37 @@ impl Default for State {
 enum RenderState {
     NotRendering,
     Pending,
-    Rendering { update: RenderUpdate },
-    Done { result: Image },
-    Stopping,
+    Rendering {
+        update: RenderUpdate,
+        stopping: bool,
+    },
+    Done(Image),
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    LinkSender(mpsc::Sender<RendererInput>),
     StartRender,
     StopRender,
-    RenderingProgress(RenderUpdate),
-    RenderingDone(Image),
+    RenderWorkerMessage(RenderWorkerMessage),
     SelectScene(String),
     UpdateResolutionY(String),
     UpdateSamplesPerPixel(String),
+    ViewportMessage(ViewportMessage),
 }
 
 fn update(state: &mut State, message: Message) {
+    fn stop_render(state: &mut State) {
+        if let RenderState::Rendering { update, .. } = &state.rendering {
+            state.rendering = RenderState::Rendering {
+                stopping: true,
+                update: update.clone(),
+            };
+            if let Some(channel) = &mut state.renderer_channel {
+                let _ = channel.try_send(RendererInput::StopRendering);
+            }
+        }
+    }
+
     match message {
         Message::StartRender => {
             if let RenderState::Rendering { .. } = state.rendering {
@@ -165,40 +170,58 @@ fn update(state: &mut State, message: Message) {
                 return;
             }
         }
-        Message::StopRender => {
-            if let RenderState::NotRendering | RenderState::Done { .. } = state.rendering {
-                return;
-            }
-            state.rendering = RenderState::Stopping;
-            if let Some(channel) = &mut state.renderer_channel {
-                let _ = channel.try_send(RendererInput::StopRendering);
-            }
-        }
-        Message::RenderingDone(result) => {
-            state.rendering = RenderState::Done { result };
-        }
-        Message::LinkSender(sender) => {
-            state.renderer_channel = Some(sender);
-        }
-        Message::RenderingProgress(update) => {
-            state.rendering = RenderState::Rendering { update };
-        }
+        Message::StopRender => stop_render(state),
         Message::SelectScene(id) => {
-            if let Some(scene) = state.scenes.iter().find(|s| s.borrow().id == id) {
-                state.selected_scene = scene.clone();
+            if let Some(scene) = state.scenes.iter().find(|s| s.id == id) {
+                state.selected_scene = Arc::new(scene.clone());
+                state.render_config.scene = scene.clone();
                 state.rendering = RenderState::NotRendering;
             } else {
                 state.config_has_error = Some(format!("Scene with id '{}' not found", id));
             }
         }
-        Message::UpdateResolutionY(value) => state.resolution_y_text = value,
-        Message::UpdateSamplesPerPixel(value) => state.samples_text = value,
+        Message::UpdateResolutionY(value) => {
+            state.render_config.resolution_y = value.parse::<usize>().unwrap_or(300);
+            state.resolution_y_text = value;
+        }
+        Message::UpdateSamplesPerPixel(value) => {
+            state.render_config.samples_per_pixel = value.parse::<usize>().unwrap_or(100);
+            state.samples_text = value;
+        }
+        Message::ViewportMessage(viewport_message) => {
+            // println!("Viewport message: {:?}", viewport_message);
+            match viewport_message {
+                ViewportMessage::UpdateCamera {
+                    position,
+                    direction,
+                    direction_update_in_progress: updating_direction,
+                } => {
+                    {
+                        let camera = &mut state.render_config.scene.camera;
+                        camera.position = position;
+
+                        if updating_direction {
+                            camera.set_updating_direction(direction);
+                        } else {
+                            camera.set_direction(direction);
+                        }
+                    }
+                    stop_render(state);
+                }
+            }
+        }
+
+        Message::RenderWorkerMessage(render_msg) => match render_msg {
+            RenderWorkerMessage::RenderingDone(image) => state.rendering = RenderState::Done(image),
+            RenderWorkerMessage::LinkSender(sender) => state.renderer_channel = Some(sender),
+            RenderWorkerMessage::RenderingProgress(update) => {
+                state.rendering = RenderState::Rendering {
+                    update,
+                    stopping: false,
+                }
+            }
+        },
     };
-    state.render_config = RenderConfig {
-        samples_per_pixel: state.samples_text.parse::<usize>().unwrap_or(100),
-        resolution_y: state.resolution_y_text.parse::<usize>().unwrap_or(300),
-        scene: state.selected_scene.borrow().clone(),
-    }
 }
 
 fn view(state: &State) -> Element<'_, Message> {
@@ -212,7 +235,7 @@ fn view(state: &State) -> Element<'_, Message> {
                             combo_box(
                                 &state.scene_ids_selector,
                                 "Select scene",
-                                Some(&state.selected_scene.borrow().id),
+                                Some(&state.selected_scene.id),
                                 Message::SelectScene
                             )
                             .width(250)
@@ -246,19 +269,12 @@ fn view(state: &State) -> Element<'_, Message> {
                 },
             ]
             .spacing(10),
-            shader(ViewportProgram {
-                config: &state.render_config,
-                // controls: Controls::default()
-            })
-            .width(state.render_config.resolution_x() as f32)
-            .height(state.render_config.resolution_y as f32),
+            ViewportProgram::view(&state.render_config).map(Message::ViewportMessage),
             {
                 let image = match &state.rendering {
-                    RenderState::NotRendering | RenderState::Pending | RenderState::Stopping => {
-                        &state.empty_image
-                    }
-                    RenderState::Rendering { update } => &update.image,
-                    RenderState::Done { result } => &result,
+                    RenderState::NotRendering | RenderState::Pending => &state.empty_image,
+                    RenderState::Rendering { update, .. } => &update.image,
+                    RenderState::Done(image) => &image,
                 };
                 // let (width, height) = image.resolution;
                 // let aspect_ratio = width as f32 / height as f32;
@@ -273,33 +289,29 @@ fn view(state: &State) -> Element<'_, Message> {
             },
             row![
                 button("Stop").on_press_maybe(match &state.rendering {
-                    RenderState::NotRendering
-                    | RenderState::Pending
-                    | RenderState::Done { result: _ }
-                    | RenderState::Stopping => None,
-                    RenderState::Rendering { update: _ } => Some(Message::StopRender),
+                    RenderState::NotRendering | RenderState::Pending | RenderState::Done(_) => None,
+                    RenderState::Rendering { .. } => Some(Message::StopRender),
                 }),
                 button(text(match &state.rendering {
-                    RenderState::NotRendering | RenderState::Done { result: _ } =>
-                        "Render".to_owned(),
-                    RenderState::Pending
-                    | RenderState::Rendering { update: _ }
-                    | RenderState::Stopping => "Rendering...".to_owned(),
+                    RenderState::NotRendering | RenderState::Done(_) => "Render".to_owned(),
+                    RenderState::Pending | RenderState::Rendering { .. } =>
+                        "Rendering...".to_owned(),
                 }))
                 .on_press_maybe(match &state.rendering {
-                    RenderState::NotRendering | RenderState::Done { result: _ } =>
-                        Some(Message::StartRender),
-                    RenderState::Pending
-                    | RenderState::Rendering { update: _ }
-                    | RenderState::Stopping => None,
+                    RenderState::NotRendering | RenderState::Done(_) => Some(Message::StartRender),
+                    RenderState::Pending | RenderState::Rendering { .. } => None,
                 }),
                 text(match &state.rendering {
                     RenderState::NotRendering => "".to_owned(),
                     RenderState::Pending => "...".to_owned(),
-                    RenderState::Stopping => "Stopping...".to_owned(),
-                    RenderState::Rendering { update } => format!("{:.2}%", update.progress * 100.0),
-                    RenderState::Done { result } =>
-                        format!("Done! ({}x{})", result.resolution.0, result.resolution.1),
+                    RenderState::Rendering { update, stopping } =>
+                        if *stopping {
+                            "Stopping...".to_owned()
+                        } else {
+                            format!("{:.2}%", update.progress * 100.0)
+                        },
+                    RenderState::Done(image) =>
+                        format!("Done! ({}x{})", image.resolution.0, image.resolution.1),
                 }),
             ]
             .align_y(iced::Alignment::Center)
@@ -459,17 +471,24 @@ enum RendererInput {
 }
 
 struct ActiveRender {
-    stop_sender: Sender<()>,
+    cancel_render: Arc<AtomicBool>,
     handles: Vec<task::JoinHandle<()>>,
 }
 
-fn render_worker() -> impl Stream<Item = Message> {
+#[derive(Debug, Clone)]
+enum RenderWorkerMessage {
+    LinkSender(mpsc::Sender<RendererInput>),
+    RenderingProgress(RenderUpdate),
+    RenderingDone(Image),
+}
+
+fn render_worker() -> impl Stream<Item = RenderWorkerMessage> {
     channel(100, |mut output| async move {
         // Create channel
         let (sender, mut receiver) = mpsc::channel(100);
 
         // Send the sender back to the application
-        let _ = output.send(Message::LinkSender(sender)).await;
+        let _ = output.send(RenderWorkerMessage::LinkSender(sender)).await;
 
         let mut active_render: Option<ActiveRender> = None;
 
@@ -481,30 +500,37 @@ fn render_worker() -> impl Stream<Item = Message> {
                 RendererInput::StartRendering { config } => {
                     let (progress_sender, mut progress_receiver) =
                         mpsc::channel::<RenderUpdate>(100);
-                    let (stop_sender, stop_receiver) = oneshot::channel();
+                    let cancel_render_arc = Arc::new(AtomicBool::new(false));
 
                     let mut output_clone = output.clone();
+                    let cancel_render = cancel_render_arc.clone();
                     let render_handle = task::spawn(async move {
                         let mut sender = progress_sender;
-                        let result = render(config, &mut sender, stop_receiver);
-                        let _ = output_clone.send(Message::RenderingDone(result)).await;
+                        let result = render(config, &mut sender, cancel_render.clone());
+                        let _ = output_clone
+                            .send(RenderWorkerMessage::RenderingDone(result))
+                            .await;
                     });
                     let mut output_clone = output.clone();
                     let forward_updates_handle = task::spawn(async move {
                         // Forward updates to the main output
                         while let Some(update) = progress_receiver.next().await {
-                            let _ = output_clone.send(Message::RenderingProgress(update)).await;
+                            let _ = output_clone
+                                .send(RenderWorkerMessage::RenderingProgress(update))
+                                .await;
                         }
                     });
+
+                    let cancel_render = cancel_render_arc.clone();
                     active_render = Some(ActiveRender {
-                        stop_sender,
+                        cancel_render,
                         handles: vec![render_handle, forward_updates_handle],
                     });
                 }
                 RendererInput::StopRendering => {
                     // Handle stop rendering
                     if let Some(render) = active_render.take() {
-                        let _ = render.stop_sender.send(());
+                        render.cancel_render.store(true, atomic::Ordering::Relaxed);
                         futures::future::join_all(render.handles).await;
                     } else {
                         println!("No active render to stop.");
@@ -516,5 +542,5 @@ fn render_worker() -> impl Stream<Item = Message> {
 }
 
 fn subscription(_state: &State) -> Subscription<Message> {
-    Subscription::run(render_worker)
+    Subscription::run(render_worker).map(|message| Message::RenderWorkerMessage(message))
 }

@@ -158,7 +158,7 @@ pub fn load_scenes() -> Vec<SceneData> {
                     reflect_type: ReflectType::Diffuse,
                 },
             }],
-            camera: default_camera,
+            camera: default_camera.clone(),
         },
         SceneData {
             id: "two-spheres".to_owned(),
@@ -182,7 +182,7 @@ pub fn load_scenes() -> Vec<SceneData> {
                     },
                 },
             ],
-            camera: default_camera,
+            camera: default_camera.clone(),
         },
         SceneData {
             id: "three-spheres".to_owned(),
@@ -215,7 +215,7 @@ pub fn load_scenes() -> Vec<SceneData> {
                     },
                 },
             ],
-            camera: default_camera,
+            camera: default_camera.clone(),
         },
         SceneData {
             id: "cornell".to_owned(),
@@ -255,7 +255,7 @@ pub fn load_scenes() -> Vec<SceneData> {
             .into_iter()
             .chain(cornell_box.clone())
             .collect(),
-            camera: default_camera,
+            camera: default_camera.clone(),
         },
         SceneData {
             id: "mesh".to_owned(),

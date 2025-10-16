@@ -5,22 +5,19 @@ pub mod scenes;
 mod test;
 
 use std::{
-    borrow::Cow,
+    cell::RefCell,
     collections::hash_map::DefaultHasher,
     fmt::Display,
     hash::{Hash, Hasher},
     io::Write,
-    process::exit,
     sync::{
         Arc,
         atomic::{self, AtomicBool},
-        mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use async_std::task;
 use glam::Vec3;
 use iced::futures::{
     self, Sink, SinkExt,
@@ -104,13 +101,17 @@ impl Display for SceneData {
 pub mod camera_data {
     use glam::Vec3;
 
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Debug)]
     pub struct CameraData {
         pub position: Vec3,
+
         /// normal to sensor plane
         direction: Vec3,
+        updating_direction: Option<Vec3>,
+
         /// in meters
         pub focal_length: f32,
+
         /// in meters
         pub sensor_width: f32,
 
@@ -121,6 +122,7 @@ pub mod camera_data {
             Self {
                 position,
                 direction: direction.normalize(),
+                updating_direction: None,
                 focal_length: 0.035,
                 sensor_width: 0.036,
                 aspect_ratio: 3.0 / 2.0,
@@ -130,9 +132,17 @@ pub mod camera_data {
         pub fn direction(&self) -> Vec3 {
             self.direction
         }
-
         pub fn set_direction(&mut self, direction: Vec3) {
             self.direction = direction.normalize();
+            self.updating_direction = None;
+        }
+
+        pub fn get_current_direction(&self) -> Vec3 {
+            self.updating_direction.unwrap_or(self.direction)
+        }
+        pub fn set_updating_direction(&mut self, direction: Vec3) {
+            self.updating_direction = Some(direction.normalize());
+            // println!("Current direction: {:?}", self.get_current_direction());
         }
 
         pub fn sensor_height(&self) -> f32 {
@@ -141,20 +151,20 @@ pub mod camera_data {
 
         /// lens center (pinhole)
         pub fn lens_center(&self) -> Vec3 {
-            self.position + self.direction * self.focal_length
+            self.position + self.get_current_direction() * self.focal_length
         }
 
         /// Returns (su, sv), two orthogonal vectors spanning the sensor plane, scaled by the sensor dimensions.
         pub fn orthogonals(&self) -> (Vec3, Vec3) {
-            let su = self
-                .direction
-                .cross(if self.direction.y.abs() < 0.9 {
+            let direction = self.get_current_direction();
+            let su = direction
+                .cross(if direction.y.abs() < 0.9 {
                     Vec3::new(0.0, 1.0, 0.0)
                 } else {
                     Vec3::new(0.0, 0.0, 1.0)
                 })
                 .normalize();
-            let sv = su.cross(self.direction);
+            let sv = su.cross(direction);
             return (su * self.sensor_width, sv * self.sensor_height());
         }
     }
@@ -687,91 +697,6 @@ impl RenderConfig {
     }
 }
 
-#[derive(Clone, Debug)]
-enum SceneId {
-    Int(usize),
-    String(String),
-}
-
-impl Display for SceneId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SceneId::Int(i) => f.write_str(&i.to_string()),
-            SceneId::String(s) => f.write_str(s),
-        }
-    }
-}
-
-impl RenderConfig {
-    fn from(args: Vec<String>) -> Option<Self> {
-        return match args.len() {
-            4 => {
-                let scene_id_int: Option<usize> = args.get(3)?.parse().ok();
-                let scene_id = match scene_id_int {
-                    Some(int) => SceneId::Int(int),
-                    None => SceneId::String(args.get(3)?.clone()),
-                };
-                let mut scenes = load_scenes().into_iter();
-                let scene: SceneData = match scene_id.clone() {
-                    SceneId::Int(i) => scenes.nth(i),
-                    SceneId::String(s) => scenes.find(|scene| scene.id == s.as_str()),
-                }
-                .unwrap_or_else(|| {
-                    // print_usage(&scenes);
-                    exit(1);
-                });
-                Some(RenderConfig {
-                    samples_per_pixel: args.get(1)?.parse().ok()?,
-                    resolution_y: args.get(2)?.parse().ok()?,
-                    scene,
-                })
-            }
-            1 => Some(RenderConfig::default()),
-            _ => None,
-        };
-    }
-}
-
-// fn print_usage(scenes: &Vec<SceneData>) {
-//     println!(
-//             "Run with:\ncargo run <samplesPerPixel = 4000> <y-resolution = 600> <scene = '{}'>\n\nScenes: {}",
-//             RenderConfig::default().scene.id,
-//             scenes.iter().enumerate().map(|(i, scene)| format!("{}: {}", i, scene.id)).collect::<Vec<_>>().join(", ")
-//         );
-// }
-
-fn print_progress(
-    processed_pixel_count: &atomic::AtomicUsize,
-    grid_size: usize,
-    time_start: Instant,
-) {
-    fn fmt(d: std::time::Duration) -> String {
-        let seconds = d.as_secs() % 60;
-        let minutes = (d.as_secs() / 60) % 60;
-        let hours = (d.as_secs() / 60) / 60;
-        if hours == 0 {
-            return format!("{}m:{:0>2}s", minutes, seconds);
-        }
-        format!("{}:{:0>2}:{:0>2}", hours, minutes, seconds)
-    }
-    let processed_percentage =
-        processed_pixel_count.load(atomic::Ordering::Relaxed) as f64 / (grid_size) as f64;
-    let elapsed = time_start.elapsed();
-    print!(
-        "\rRendering ... {:3.1}% ({} / {})",
-        100.0 * processed_percentage,
-        fmt(elapsed),
-        fmt(Duration::from_secs(
-            (elapsed.as_secs() as f64 * (1.0 / processed_percentage)) as u64
-        ))
-    );
-    std::io::stdout().flush().unwrap();
-}
-
-fn load_render_config_from_args() -> RenderConfig {
-    RenderConfig::from(std::env::args().collect()).unwrap()
-}
-
 #[derive(Debug, Clone)]
 pub struct RenderUpdate {
     pub progress: f64,
@@ -818,9 +743,9 @@ pub fn render(
     send_update_progress: &mut (
              impl Sink<RenderUpdate, Error = SendError> + Unpin + Clone + Sync + Send
          ),
-    stop_receiver: oneshot::Receiver<()>,
+    cancel_render: Arc<AtomicBool>,
 ) -> Image {
-    let image = thread::scope(move |s| {
+    thread::scope(move |s| {
         let resy = render_config.resolution_y;
         let resx: usize = render_config.resolution_x();
 
@@ -859,14 +784,18 @@ pub fn render(
         let resolution = (resx.clone(), resy.clone());
 
         // Start background thread that listens for stop signal
-        let store_stop_render = stop_render.clone();
+        let background_stop_render = stop_render.clone();
         s.spawn(move || {
-            futures::executor::block_on(async {
-                if let Ok(_) = stop_receiver.await {
-                    println!("Received stop signal");
-                    store_stop_render.store(true, atomic::Ordering::Relaxed);
+            loop {
+                if cancel_render.load(atomic::Ordering::Relaxed) == true {
+                    println!("Canceling render prematurely");
+                    background_stop_render.store(true, atomic::Ordering::Relaxed);
                 }
-            });
+                if background_stop_render.load(atomic::Ordering::Relaxed) == true {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         });
 
         // Start background thread that sends regular progress updates
@@ -963,6 +892,7 @@ pub fn render(
                 indices.shuffle(&mut rand::thread_rng());
                 indices.into_par_iter().for_each(render_pixel_to_vec);
             };
+            println!("Rendering complete");
             stop_render.store(true, atomic::Ordering::Relaxed);
 
             // print_progress();
@@ -1031,8 +961,6 @@ pub fn render(
         });
 
         let image = render_thread_handle.join().unwrap();
-        return image;
-    });
-
-    return image;
+        image
+    })
 }

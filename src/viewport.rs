@@ -1,11 +1,15 @@
 use glam::{Mat4, Vec3};
 use iced::{
-    Rectangle,
+    Element, Point, Rectangle,
     advanced::Shell,
-    event, mouse,
-    widget::shader::{
-        self, Primitive,
-        wgpu::{self},
+    event,
+    mouse::{self, Button},
+    widget::{
+        self,
+        shader::{
+            self, Primitive,
+            wgpu::{self},
+        },
     },
 };
 
@@ -85,6 +89,7 @@ impl Primitive for ViewportPrimitive {
         let focal_length: f32 = self.camera.focal_length;
         // Create a "look-at" target point from the camera position and direction
         let lens_center = self.camera.lens_center();
+        // println!("Lens center: {:?}", lens_center);
 
         let up = Vec3::new(0.0, 1.0, 0.0);
 
@@ -329,14 +334,24 @@ impl FragmentShaderPipeline {
 }
 
 #[derive(Default)]
-pub struct ViewportState {}
+pub struct ViewportState {
+    cursor_move_start: Option<Point>,
+}
 
 pub struct ViewportProgram<'a> {
     pub config: &'a RenderConfig,
-    // pub controls: Controls,
 }
 
-impl<Message> shader::Program<Message> for ViewportProgram<'_> {
+impl ViewportProgram<'_> {
+    pub fn view(config: &'_ RenderConfig) -> Element<'_, ViewportMessage> {
+        widget::shader(ViewportProgram { config: &config })
+            .width(config.resolution_x() as f32)
+            .height(config.resolution_y as f32)
+            .into()
+    }
+}
+
+impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
     type State = ViewportState;
 
     type Primitive = ViewportPrimitive;
@@ -363,28 +378,78 @@ impl<Message> shader::Program<Message> for ViewportProgram<'_> {
                         })
                 })
                 .collect(),
-            camera: self.config.scene.camera,
+            camera: self.config.scene.camera.clone(),
         }
     }
 
     fn update(
         &self,
-        _state: &mut Self::State,
+        state: &mut Self::State,
         event: shader::Event,
-        _bounds: Rectangle,
-        _cursor: mouse::Cursor,
-        _shell: &mut Shell<'_, Message>,
-    ) -> (event::Status, Option<Message>) {
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+        _shell: &mut Shell<'_, ViewportMessage>,
+    ) -> (event::Status, Option<ViewportMessage>) {
         match event {
-            shader::Event::Mouse(mouse::Event::CursorMoved { position: _ }) => {
-                // state.offset = Vec2::new(
-                //     ((position.x - bounds.x) / bounds.width) * 2.0 - 1.0,
-                //     -(((position.y - bounds.y) / bounds.height) * 2.0 - 1.0),
-                // );
-
-                (event::Status::Captured, None)
+            shader::Event::Mouse(mouse::Event::ButtonPressed(Button::Left)) => {
+                if let Some(pos) = cursor.position()
+                    && bounds.contains(pos)
+                {
+                    state.cursor_move_start = Some(pos);
+                    return (event::Status::Captured, None);
+                }
             }
-            _ => (event::Status::Ignored, None),
+            shader::Event::Mouse(mouse::Event::ButtonReleased(Button::Left)) => {
+                state.cursor_move_start = None;
+                return (
+                    event::Status::Captured,
+                    Some(ViewportMessage::UpdateCamera {
+                        position: self.config.scene.camera.position,
+                        direction: self.config.scene.camera.get_current_direction(),
+                        direction_update_in_progress: false,
+                    }),
+                );
+            }
+            shader::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                if let Some(start) = state.cursor_move_start {
+                    let delta = position - start;
+                    let sensitivity = 5.0 / self.config.resolution_y as f32; // Adjust sensitivity as needed
+                    let yaw = -delta.x * sensitivity;
+                    let pitch = -delta.y * sensitivity;
+
+                    let direction = self.config.scene.camera.direction();
+
+                    // Yaw rotation around the up vector
+                    let yaw_matrix = Mat4::from_axis_angle(Vec3::Y, yaw);
+                    let new_direction = yaw_matrix.transform_vector3(direction);
+
+                    // Pitch rotation around the right vector
+                    let right = new_direction.cross(Vec3::Y).normalize();
+                    let pitch_matrix = Mat4::from_axis_angle(right, pitch);
+                    let final_direction = pitch_matrix.transform_vector3(new_direction).normalize();
+
+                    return (
+                        event::Status::Captured,
+                        Some(ViewportMessage::UpdateCamera {
+                            position: self.config.scene.camera.position,
+                            direction: final_direction,
+                            direction_update_in_progress: true,
+                        }),
+                    );
+                }
+            }
+            _ => {}
         }
+
+        (event::Status::Ignored, None)
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ViewportMessage {
+    UpdateCamera {
+        position: Vec3,
+        direction: Vec3,
+        direction_update_in_progress: bool,
+    },
 }
