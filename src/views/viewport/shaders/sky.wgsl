@@ -28,8 +28,9 @@ fn fragment_main(
     fragData: VertexOut,
 ) -> @location(0) vec4<f32>
 {
-    let t = fragData.position.y * 0.5 + 0.5;
-    let color = mix(uniforms.bottom_color, uniforms.top_color, t);
-    return vec4<f32>(color, 1.0);   
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0); // Placeholder
+    // let t = fragData.position.y * 0.5 + 0.5;
+    // let color = mix(uniforms.bottom_color, uniforms.top_color, t);
+    // return vec4<f32>(color, 1.0);   
 }
 

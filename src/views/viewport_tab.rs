@@ -72,22 +72,7 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
         _bounds: iced::Rectangle,
     ) -> Self::Primitive {
         ViewportPrimitive {
-            triangles: self
-                .config
-                .scene
-                .objects
-                .iter()
-                .flat_map(|object| {
-                    object
-                        .to_triangles()
-                        .into_iter()
-                        .map(|tri| TriangleWithColor {
-                            tri: tri.transformed(&object.position),
-                            color: object.material.color,
-                        })
-                })
-                .collect(),
-            camera: self.config.scene.camera.clone(),
+            config: self.config.clone(),
         }
     }
 

@@ -5,41 +5,24 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "type": "lldb",
+            "type": "lldb-dap",
             "request": "launch",
             "name": "Debug executable 'path-tracer-rust'",
-            "cargo": {
-                "args": [
-                    "build",
-                    "--bin=path-tracer-rust",
-                    "--package=path-tracer-rust"
-                ],
-                "filter": {
-                    "name": "path-tracer-rust",
-                    "kind": "bin"
-                }
-            },
+            "preLaunchTask": "rust: cargo build",
+            "program": "${workspaceFolder}/target/debug/path-tracer-rust",
             "args": [
-                "500","300", "mesh"
+                "500",
+                "300",
+                "mesh"
             ],
             "cwd": "${workspaceFolder}"
         },
         {
-            "type": "lldb",
+            "type": "lldb-dap",
             "request": "launch",
             "name": "Debug unit tests in executable 'path-tracer-rust'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--bin=path-tracer-rust",
-                    "--package=path-tracer-rust"
-                ],
-                "filter": {
-                    "name": "path-tracer-rust",
-                    "kind": "bin"
-                }
-            },
+            "preLaunchTask": "rust: cargo build --tests",
+            "program": "${workspaceFolder}/target/debug/path-tracer-rust",
             "args": [],
             "cwd": "${workspaceFolder}"
         }
