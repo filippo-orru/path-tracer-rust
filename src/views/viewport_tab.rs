@@ -1,10 +1,7 @@
 use iced::{Element, widget::row};
 
 use crate::render::{Ray, RenderConfig, intersect_scene};
-use crate::{
-    Message, State,
-    views::viewport::viewport_render::{TriangleWithColor, ViewportPrimitive},
-};
+use crate::{Message, State, views::viewport::viewport_render::ViewportPrimitive};
 use glam::{Mat4, Vec3};
 use iced::{
     Length, Point, Rectangle,
@@ -132,7 +129,7 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
 
                     const PAN_SENSITIVITY: f32 = 1.0;
 
-                    let sensitivity = PAN_SENSITIVITY / self.config.resolution_y as f32;
+                    let sensitivity = PAN_SENSITIVITY / self.config.resolution.height as f32;
                     let yaw = -delta.x * sensitivity;
                     let pitch = -delta.y * sensitivity;
 

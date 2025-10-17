@@ -60,7 +60,7 @@ pub fn render_tab(state: &'_ State) -> Element<'_, Message> {
                     let image = match &state.rendering {
                         RenderState::NotRendering | RenderState::Pending => &state.empty_image,
                         RenderState::Rendering { update, .. } => &update.image,
-                        RenderState::Done(image) => &image,
+                        RenderState::Done(done) => &done.image,
                     };
                     let progress: Option<f32> = match &state.rendering {
                         RenderState::NotRendering => None,
@@ -79,8 +79,12 @@ pub fn render_tab(state: &'_ State) -> Element<'_, Message> {
                         } else {
                             format!("{:.2}%", update.progress * 100.0)
                         },
-                    RenderState::Done(image) =>
-                        format!("Done! ({}x{})", image.resolution.0, image.resolution.1),
+                    RenderState::Done(done) => format!(
+                        "Done! ({}x{}, {:.2} seconds)",
+                        done.image.resolution.width,
+                        done.image.resolution.height,
+                        done.duration.as_secs_f32()
+                    ),
                 }))
                 .padding(10)
                 .width(Length::Fill)
@@ -264,20 +268,20 @@ impl<Message> canvas::Program<Message> for RenderView<'_> {
                 Color::from_rgb(0.04, 0.04, 0.04),
             );
 
-            let (resx, resy) = self.image.resolution;
-            let scale_x = bounds.width / resx as f32;
-            let scale_y = bounds.height / resy as f32;
+            let res = &self.image.resolution;
+            let scale_x = bounds.width / res.width as f32;
+            let scale_y = bounds.height / res.height as f32;
 
             let scale = scale_x.min(scale_y);
 
             let offset = Point {
-                x: (bounds.width - resx as f32 * scale) / 2.0,
-                y: (bounds.height - resy as f32 * scale) / 2.0,
+                x: (bounds.width - res.width as f32 * scale) / 2.0,
+                y: (bounds.height - res.height as f32 * scale) / 2.0,
             };
 
-            for y in 0..resy {
-                for x in 0..resx {
-                    let color = self.image.pixels[(resy - y) * resx - x - 1];
+            for y in 0..res.height {
+                for x in 0..res.width {
+                    let color = self.image.pixels[(res.height - y) * res.width - x - 1];
                     let red = gamma_correction(color.x);
                     let green = gamma_correction(color.y);
                     let blue = gamma_correction(color.z);

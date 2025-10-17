@@ -14,14 +14,13 @@ use std::{
         atomic::{self, AtomicBool},
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use glam::Vec3;
 use iced::futures::{self, Sink, SinkExt, channel::mpsc::SendError};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
-use scenes::load_scenes;
 
 use crate::render::camera_data::CameraData;
 
@@ -669,27 +668,90 @@ fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Ve
     };
 }
 
+fn render_pixel(
+    config: &RenderConfig,
+    pixel_index: usize,
+    orthogonals: (Vec3, Vec3),
+    lens_center: Vec3,
+    processed_pixel_count: &Arc<atomic::AtomicUsize>,
+) -> Vec3 {
+    let res = &config.resolution;
+    let scene_objects = &config.scene.objects;
+    let sensor_origin = &config.scene.camera.position;
+
+    let y = res.height - 1 - pixel_index / res.width;
+    let x = pixel_index % res.width;
+
+    let (su, sv) = orthogonals;
+
+    let mut radiance_v: Vec3 = Vec3::default();
+
+    for s in 0..config.samples_per_pixel {
+        // map to 2x2 subpixel rows and cols
+        let ysub: f32 = ((s / 2) % 2) as f32;
+        let xsub: f32 = (s % 2) as f32;
+
+        // sample sensor subpixel in [-1,1]
+        let r1: f32 = 2.0 * rand01();
+        let r2: f32 = 2.0 * rand01();
+        let xfilter: f32 = if r1 < 1.0 {
+            // TODO not sure what this is
+            r1.sqrt() - 1.0
+        } else {
+            1.0 - (2.0 - r1).sqrt()
+        };
+        let yfilter: f32 = if r2 < 1.0 {
+            r2.sqrt() - 1.0
+        } else {
+            1.0 - (2.0 - r2).sqrt()
+        };
+
+        // x and y sample position on sensor plane
+        let sx: f32 = (x as f32 + 0.5 * (0.5 + xsub + xfilter)) / res.width as f32 - 0.5;
+        let sy: f32 = (y as f32 + 0.5 * (0.5 + ysub + yfilter)) / res.height as f32 - 0.5;
+
+        // 3d sample position on sensor
+        let sensor_pos = sensor_origin + su * sx + sv * sy;
+        let ray_direction = (lens_center - sensor_pos).normalize();
+        // ray through pinhole
+        let ray = Ray {
+            origin: lens_center,
+            direction: ray_direction,
+        };
+
+        // evaluate radiance from this ray and accumulate
+        radiance_v = radiance_v + radiance(&ray, 0, scene_objects);
+    }
+    // normalize radiance by number of samples
+    radiance_v = radiance_v / config.samples_per_pixel as f32;
+    processed_pixel_count.fetch_add(1, atomic::Ordering::Relaxed);
+
+    Vec3::new(
+        radiance_v.x.clamp(0.0, 1.0),
+        radiance_v.y.clamp(0.0, 1.0),
+        radiance_v.z.clamp(0.0, 1.0),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RenderConfig {
     pub samples_per_pixel: usize,
-    pub resolution_y: usize,
+    pub resolution: Resolution,
     pub scene: SceneData,
 }
 
-impl Default for RenderConfig {
-    fn default() -> Self {
-        let scenes = load_scenes();
-        Self {
-            samples_per_pixel: 400,
-            resolution_y: 300,
-            scene: scenes.into_iter().next().unwrap(),
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+pub struct Resolution {
+    pub height: usize,
+    pub width: usize,
 }
 
-impl RenderConfig {
-    pub fn resolution_x(&self) -> usize {
-        self.resolution_y * 3 / 2
+impl Default for Resolution {
+    fn default() -> Self {
+        Self {
+            height: 300,
+            width: 300 * 3 / 2,
+        }
     }
 }
 
@@ -700,13 +762,19 @@ pub struct RenderUpdate {
 }
 
 #[derive(Debug, Clone)]
+pub struct RenderDone {
+    pub image: Image,
+    pub duration: Duration,
+}
+
+#[derive(Debug, Clone)]
 pub struct Image {
     pub pixels: Vec<Vec3>,
-    pub resolution: (usize, usize),
+    pub resolution: Resolution,
     pub hash: u64,
 }
 impl Image {
-    fn new(pixels: Vec<Vec3>, resolution: (usize, usize)) -> Self {
+    fn new(pixels: Vec<Vec3>, resolution: Resolution) -> Self {
         Self {
             hash: hash_vec_of_vectors(&pixels),
             pixels,
@@ -740,43 +808,16 @@ pub fn render(
              impl Sink<RenderUpdate, Error = SendError> + Unpin + Clone + Sync + Send
          ),
     cancel_render: Arc<AtomicBool>,
-) -> Image {
+) -> RenderDone {
     thread::scope(move |s| {
-        let resy = render_config.resolution_y;
-        let resx: usize = render_config.resolution_x();
-
-        let scene = render_config.scene;
         let time_start = Instant::now();
-        let scene_objects = scene.objects.clone();
 
-        //-- setup sensor
-        let sensor_origin: Vec3 = scene.camera.position;
-        let lens_center = scene.camera.lens_center();
-        let (su, sv) = scene.camera.orthogonals();
-
-        let grid_size = resx * resy;
-
-        println!(
-            "Scene {} ({} objects), {} samples per pixel, {}x{} resolution{}",
-            scene.id,
-            scene_objects.len(),
-            render_config.samples_per_pixel,
-            render_config.resolution_y * 3 / 2,
-            render_config.resolution_y,
-            if MOCK_RANDOM { " (mock random)" } else { "" }
-        );
-
-        // let last_progress_print_time = atomic::AtomicU64::new(0);
-        // let max_time_between_progress_prints = 1000;
-        let processed_pixel_count = Arc::new(atomic::AtomicUsize::new(0));
-        let get_processed_pixel_count = processed_pixel_count.clone();
-
+        let res = render_config.resolution;
+        let grid_size = res.width * res.height;
         let pixels = Arc::new(std::sync::Mutex::new(vec![Vec3::default(); grid_size]));
         let get_pixels = pixels.clone();
 
         let stop_render = Arc::new(AtomicBool::new(false));
-
-        let resolution = (resx.clone(), resy.clone());
 
         // Start background thread that listens for stop signal
         let background_stop_render = stop_render.clone();
@@ -789,9 +830,12 @@ pub fn render(
                 if background_stop_render.load(atomic::Ordering::Relaxed) == true {
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(Duration::from_millis(100));
             }
         });
+
+        let processed_pixel_count = Arc::new(atomic::AtomicUsize::new(0));
+        let get_processed_pixel_count = processed_pixel_count.clone();
 
         // Start background thread that sends regular progress updates
         let background_stop_render = stop_render.clone();
@@ -807,74 +851,42 @@ pub fn render(
                     / (grid_size) as f32;
                 let _ = futures::executor::block_on(send_update_progress.send(RenderUpdate {
                     progress: processed_percentage,
-                    image: Image::new(get_pixels.lock().unwrap().clone(), resolution),
+                    image: Image::new(get_pixels.lock().unwrap().clone(), res),
                 }));
 
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(Duration::from_millis(500));
             }
         });
 
         let render_thread_handle = s.spawn(move || {
-            // Pure function for rendering a single pixel
-            let render_pixel = |pixel_index: usize| -> Vec3 {
-                let y = resy - 1 - pixel_index / resx;
-                let x = pixel_index % resx;
+            let scene = &render_config.scene;
 
-                let mut radiance_v: Vec3 = Vec3::default();
+            println!(
+                "Rendering scene {} ({} objects), {} samples per pixel, {}x{} resolution{}",
+                scene.id,
+                scene.objects.len(),
+                render_config.samples_per_pixel,
+                res.width,
+                res.height,
+                if MOCK_RANDOM { " (mock random)" } else { "" }
+            );
 
-                for s in 0..render_config.samples_per_pixel {
-                    // map to 2x2 subpixel rows and cols
-                    let ysub: f32 = ((s / 2) % 2) as f32;
-                    let xsub: f32 = (s % 2) as f32;
-
-                    // sample sensor subpixel in [-1,1]
-                    let r1: f32 = 2.0 * rand01();
-                    let r2: f32 = 2.0 * rand01();
-                    let xfilter: f32 = if r1 < 1.0 {
-                        // TODO not sure what this is
-                        r1.sqrt() - 1.0
-                    } else {
-                        1.0 - (2.0 - r1).sqrt()
-                    };
-                    let yfilter: f32 = if r2 < 1.0 {
-                        r2.sqrt() - 1.0
-                    } else {
-                        1.0 - (2.0 - r2).sqrt()
-                    };
-
-                    // x and y sample position on sensor plane
-                    let sx: f32 = (x as f32 + 0.5 * (0.5 + xsub + xfilter)) / resx as f32 - 0.5;
-                    let sy: f32 = (y as f32 + 0.5 * (0.5 + ysub + yfilter)) / resy as f32 - 0.5;
-
-                    // 3d sample position on sensor
-                    let sensor_pos = sensor_origin + su * sx + sv * sy;
-                    let ray_direction = (lens_center - sensor_pos).normalize();
-                    // ray through pinhole
-                    let ray = Ray {
-                        origin: lens_center,
-                        direction: ray_direction,
-                    };
-
-                    // evaluate radiance from this ray and accumulate
-                    radiance_v = radiance_v + radiance(&ray, 0, &scene_objects);
-                }
-                // normalize radiance by number of samples
-                radiance_v = radiance_v / render_config.samples_per_pixel as f32;
-                processed_pixel_count.fetch_add(1, atomic::Ordering::Relaxed);
-
-                Vec3::new(
-                    radiance_v.x.clamp(0.0, 1.0),
-                    radiance_v.y.clamp(0.0, 1.0),
-                    radiance_v.z.clamp(0.0, 1.0),
-                )
-            };
+            //-- setup sensor
+            let lens_center = scene.camera.lens_center();
+            let orthogonals = scene.camera.orthogonals();
 
             let render_pixel_to_vec = |pixel_index: usize| {
                 let stop_render = stop_render.clone();
                 if stop_render.load(atomic::Ordering::Relaxed) == true {
                     return;
                 }
-                let pixel_value = render_pixel(pixel_index);
+                let pixel_value = render_pixel(
+                    &render_config,
+                    pixel_index,
+                    orthogonals,
+                    lens_center,
+                    &processed_pixel_count,
+                );
                 let mut pixels = pixels.lock().unwrap();
                 pixels[pixel_index] = pixel_value;
             };
@@ -902,14 +914,14 @@ pub fn render(
                 chrono::Local::now().format("%Y-%m-%d_%H:%M:%S").to_string(),
                 scene.id,
                 render_config.samples_per_pixel,
-                render_config.resolution_y,
+                res.height,
             );
             let mut file = std::fs::File::create(path.clone()).unwrap();
             file.write_all(b"P3\n").unwrap();
             file.write_all(
                 format!(
                     "# samplesPerPixel: {}, resolution_y: {}, scene_id: {}\n",
-                    render_config.samples_per_pixel, render_config.resolution_y, scene.id
+                    render_config.samples_per_pixel, res.height, scene.id
                 )
                 .as_bytes(),
             )
@@ -924,7 +936,7 @@ pub fn render(
                 .as_bytes(),
             )
             .unwrap();
-            file.write_all(format!("{} {}\n{}\n", resx, resy, 255).as_bytes())
+            file.write_all(format!("{} {}\n{}\n", res.width, res.height, 255).as_bytes())
                 .unwrap();
             let pixels = pixels.lock().unwrap().to_vec();
             for pixel in pixels.iter().rev() {
@@ -952,10 +964,13 @@ pub fn render(
                 }
             }
 
-            return Image::new(pixels, (resx, resy));
+            return Image::new(pixels, res);
         });
 
         let image = render_thread_handle.join().unwrap();
-        image
+        RenderDone {
+            image,
+            duration: time_start.elapsed(),
+        }
     })
 }

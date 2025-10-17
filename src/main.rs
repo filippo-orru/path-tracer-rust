@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use iced::Element;
 use iced::Length;
@@ -22,7 +23,9 @@ use iced::{Point, Size, Subscription, application};
 
 use crate::render::Image;
 use crate::render::RenderConfig;
+use crate::render::RenderDone;
 use crate::render::RenderUpdate;
+use crate::render::Resolution;
 use crate::render::SceneData;
 use crate::render::render;
 use crate::render::scenes::load_scenes;
@@ -87,13 +90,16 @@ impl Default for State {
             config_has_error: None,
             render_config: RenderConfig {
                 samples_per_pixel: 100,
-                resolution_y: 300,
+                resolution: Resolution::default(),
                 scene: mesh.clone(),
             },
             rendering: RenderState::NotRendering,
             empty_image: Image {
                 pixels: vec![],
-                resolution: (0, 0),
+                resolution: Resolution {
+                    width: 0,
+                    height: 0,
+                },
                 hash: 0,
             },
             tab: Tab::Viewport,
@@ -108,7 +114,7 @@ enum RenderState {
         update: RenderUpdate,
         stopping: bool,
     },
-    Done(Image),
+    Done(RenderDone),
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +192,10 @@ fn update(state: &mut State, message: Message) {
             }
         }
         Message::UpdateResolutionY(value) => {
-            state.render_config.resolution_y = value.parse::<usize>().unwrap_or(300);
+            let val = value.parse::<usize>().unwrap_or(300);
+            state.render_config.resolution.height = val;
+            state.render_config.resolution.width = val * 3 / 2;
+
             state.resolution_y_text = value;
         }
         Message::UpdateSamplesPerPixel(value) => {
@@ -220,7 +229,7 @@ fn update(state: &mut State, message: Message) {
             }
         }
         Message::RenderWorkerMessage(render_msg) => match render_msg {
-            RenderWorkerMessage::RenderingDone(image) => state.rendering = RenderState::Done(image),
+            RenderWorkerMessage::RenderingDone(done) => state.rendering = RenderState::Done(done),
             RenderWorkerMessage::LinkSender(sender) => state.renderer_channel = Some(sender),
             RenderWorkerMessage::RenderingProgress(update) => {
                 state.rendering = RenderState::Rendering {
@@ -309,7 +318,7 @@ struct ActiveRender {
 enum RenderWorkerMessage {
     LinkSender(mpsc::Sender<RendererInput>),
     RenderingProgress(RenderUpdate),
-    RenderingDone(Image),
+    RenderingDone(RenderDone),
 }
 
 fn render_worker() -> impl Stream<Item = RenderWorkerMessage> {
