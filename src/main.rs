@@ -198,22 +198,26 @@ fn update(state: &mut State, message: Message) {
         Message::ViewportMessage(viewport_message) => {
             // println!("Viewport message: {:?}", viewport_message);
             match viewport_message {
-                ViewportMessage::UpdateCamera {
-                    position,
-                    direction,
-                    direction_update_in_progress: updating_direction,
-                } => {
-                    {
-                        let camera = &mut state.render_config.scene.camera;
-                        camera.position = position;
-
-                        if updating_direction {
-                            camera.set_updating_direction(direction);
-                        } else {
-                            camera.set_direction(direction);
-                        }
-                    }
-                    stop_render(state);
+                ViewportMessage::LookAround(direction) => {
+                    state
+                        .render_config
+                        .scene
+                        .camera
+                        .set_updating_direction(direction);
+                }
+                ViewportMessage::CommitLookAround => {
+                    state
+                        .render_config
+                        .scene
+                        .camera
+                        .set_direction(state.render_config.scene.camera.get_current_direction());
+                }
+                ViewportMessage::Move(position) => {
+                    state.render_config.scene.camera.position = position;
+                }
+                ViewportMessage::Orbit { position, rotation } => {
+                    state.render_config.scene.camera.position = position;
+                    state.render_config.scene.camera.set_direction(rotation);
                 }
             }
         }

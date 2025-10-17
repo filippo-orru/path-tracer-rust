@@ -3,17 +3,21 @@ use iced::{
     Element, Length, Point, Rectangle,
     advanced::Shell,
     event,
+    keyboard::{
+        Event::{KeyPressed, KeyReleased},
+        Key::Named,
+    },
     mouse::{self, Button},
     widget::{
         self,
         shader::{
-            self, Primitive,
+            self, Event, Primitive,
             wgpu::{self},
         },
     },
 };
 
-use crate::render::{RenderConfig, Triangle, camera_data::CameraData};
+use crate::render::{Ray, RenderConfig, Triangle, camera_data::CameraData, intersect_scene};
 
 #[derive(Debug)]
 pub struct ViewportPrimitive {
@@ -336,6 +340,21 @@ impl FragmentShaderPipeline {
 #[derive(Default)]
 pub struct ViewportState {
     cursor_move_start: Option<Point>,
+    modifier_mode: ViewportModifierMode,
+    orbiting_around: Option<OrbitingAround>,
+}
+
+#[derive(Default)]
+enum ViewportModifierMode {
+    #[default]
+    Orbit,
+    Zoom,
+    Pan,
+}
+
+struct OrbitingAround {
+    point: Vec3,
+    cursor: Point, // For identifying when to reset
 }
 
 pub struct ViewportProgram<'a> {
@@ -385,13 +404,32 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
     fn update(
         &self,
         state: &mut Self::State,
-        event: shader::Event,
+        event: Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
         _shell: &mut Shell<'_, ViewportMessage>,
     ) -> (event::Status, Option<ViewportMessage>) {
         match event {
-            shader::Event::Mouse(mouse::Event::ButtonPressed(Button::Left)) => {
+            Event::Keyboard(KeyPressed { key, .. }) => {
+                state.modifier_mode = ViewportModifierMode::Orbit;
+                if key == Named(iced::keyboard::key::Named::Super) {
+                    //todoo handle non-apple
+                    state.modifier_mode = ViewportModifierMode::Pan;
+                }
+                if key == Named(iced::keyboard::key::Named::Shift) {
+                    state.modifier_mode = ViewportModifierMode::Zoom;
+                }
+            }
+            Event::Keyboard(KeyReleased { key, modifiers, .. }) => {
+                state.modifier_mode = ViewportModifierMode::Orbit;
+                if key != Named(iced::keyboard::key::Named::Super) && modifiers.macos_command() {
+                    state.modifier_mode = ViewportModifierMode::Zoom;
+                }
+                if key != Named(iced::keyboard::key::Named::Shift) && modifiers.shift() {
+                    state.modifier_mode = ViewportModifierMode::Pan;
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(Button::Left)) => {
                 if let Some(pos) = cursor.position()
                     && bounds.contains(pos)
                 {
@@ -399,18 +437,21 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                     return (event::Status::Captured, None);
                 }
             }
-            shader::Event::Mouse(mouse::Event::ButtonReleased(Button::Left)) => {
+            Event::Mouse(mouse::Event::ButtonReleased(Button::Left)) => {
                 state.cursor_move_start = None;
                 return (
                     event::Status::Captured,
-                    Some(ViewportMessage::UpdateCamera {
-                        position: self.config.scene.camera.position,
-                        direction: self.config.scene.camera.get_current_direction(),
-                        direction_update_in_progress: false,
-                    }),
+                    Some(ViewportMessage::CommitLookAround),
                 );
             }
-            shader::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                if let Some(orbit) = &state.orbiting_around
+                    && orbit.cursor != position
+                {
+                    // Reset orbiting if cursor moved after the wheel event
+                    state.orbiting_around = None;
+                }
+
                 if let Some(start) = state.cursor_move_start {
                     let delta = position - start;
 
@@ -433,15 +474,108 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
 
                     return (
                         event::Status::Captured,
-                        Some(ViewportMessage::UpdateCamera {
-                            position: self.config.scene.camera.position,
-                            direction: final_direction,
-                            direction_update_in_progress: true,
-                        }),
+                        Some(ViewportMessage::LookAround(final_direction)),
                     );
                 }
             }
-            // shader::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Event::Mouse(mouse::Event::WheelScrolled { delta }) => match delta {
+                mouse::ScrollDelta::Lines { .. } => todo!(),
+                mouse::ScrollDelta::Pixels { x, y } => {
+                    if let Some(pos) = cursor.position()
+                        && bounds.contains(pos)
+                    {
+                        match state.modifier_mode {
+                            ViewportModifierMode::Zoom => {
+                                state.orbiting_around = None;
+
+                                // Move camera forward/backward along its direction
+                                let camera = &self.config.scene.camera;
+                                let direction = camera.direction();
+                                let position = camera.position + direction * y * 0.01;
+                                return (
+                                    event::Status::Captured,
+                                    Some(ViewportMessage::Move(position)),
+                                );
+                            }
+                            ViewportModifierMode::Orbit => {
+                                // Orbit around the look-at point
+                                const SENSITIVITY: f32 = 0.0022;
+                                let camera = &self.config.scene.camera;
+                                let lens_center = camera.lens_center();
+                                let direction = camera.direction();
+                                let ray = Ray {
+                                    origin: lens_center,
+                                    direction: direction,
+                                };
+                                let orbit_center = match &state.orbiting_around {
+                                    Some(center) => center.point,
+                                    None => {
+                                        let intersect =
+                                            intersect_scene(&ray, &self.config.scene.objects);
+
+                                        let orbit_distance = match intersect {
+                                            crate::render::SceneIntersectResult::NoHit => {
+                                                // Fallback to distance based on zoom
+                                                lens_center.length()
+                                            }
+                                            crate::render::SceneIntersectResult::Hit {
+                                                hit,
+                                                ..
+                                            } => hit.distance,
+                                        };
+
+                                        let orbit_center = lens_center + direction * orbit_distance;
+                                        state.orbiting_around = Some(OrbitingAround {
+                                            point: orbit_center,
+                                            cursor: cursor.position().unwrap(),
+                                        });
+                                        orbit_center
+                                    }
+                                };
+
+                                let direction = camera.position - orbit_center;
+                                let orbited_direction = {
+                                    let up = Vec3::Y;
+                                    let yaw_matrix = Mat4::from_axis_angle(up, -x * SENSITIVITY);
+                                    let with_yaw = yaw_matrix.transform_vector3(direction);
+
+                                    let right = with_yaw.cross(Vec3::Y).normalize();
+                                    let pitch_matrix =
+                                        Mat4::from_axis_angle(right, y * SENSITIVITY);
+                                    pitch_matrix.transform_vector3(with_yaw)
+                                };
+                                let position = orbit_center + orbited_direction;
+                                let camera_rotation = -orbited_direction;
+
+                                return (
+                                    event::Status::Captured,
+                                    Some(ViewportMessage::Orbit {
+                                        position,
+                                        rotation: camera_rotation,
+                                    }),
+                                );
+                            }
+                            ViewportModifierMode::Pan => {
+                                state.orbiting_around = None;
+
+                                // Move camera position in the view plane
+
+                                let camera = &self.config.scene.camera;
+                                let direction = camera.direction();
+                                let right = direction.cross(Vec3::Y).normalize();
+                                let up = right.cross(direction).normalize();
+                                let move_vec = right * -x + up * y;
+
+                                let position = camera.position + move_vec * 0.005;
+                                return (
+                                    event::Status::Captured,
+                                    Some(ViewportMessage::Move(position)),
+                                );
+                            }
+                        }
+                    }
+                }
+            },
             _ => {}
         }
 
@@ -451,9 +585,8 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
 
 #[derive(Debug, Clone)]
 pub enum ViewportMessage {
-    UpdateCamera {
-        position: Vec3,
-        direction: Vec3,
-        direction_update_in_progress: bool,
-    },
+    LookAround(Vec3),
+    CommitLookAround,
+    Move(Vec3),
+    Orbit { position: Vec3, rotation: Vec3 },
 }
