@@ -4,22 +4,17 @@ struct Light {
     intensity: f32,
 }
 
-struct Uniforms {
-    // offset: vec2f,
+@export struct MyUniforms {
 	view_proj: mat4x4<f32>,
-
-	// center: vec2f,
-	// scale: f32,
-	// max_iter: u32,
-    // light: Light,
+    resolution: vec2f,
 }
+// light: Light,
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(0) var<uniform> uniforms: MyUniforms;
 
-struct Vertex {
+@export struct Vertex {
     @location(0) position: vec4f,
     @location(1) color: vec4f,
-    @builtin(vertex_index) vertexIndex : u32,
 };
 
 @vertex
@@ -46,22 +41,21 @@ struct VertexOut {
     @location(2) normal : vec3<f32>,
 }
 
+// Hard-coded values, should pass these as uniforms
+const light_position = vec3<f32>(1.0, -5.0, 5.0);
+const light_color = vec3<f32>(1.0, 1.0, 1.0);
+const ambient_strength = 0.1;
+const ambient = ambient_strength * light_color;
+const specular_strength = 0.5;
+const shininess = 32.0;
+
 @fragment
 fn fragment_main(
     fragData: VertexOut,
 ) -> @location(0) vec4<f32>
 {
     let normal = fragData.normal;
-    
-    // Hard-coded values (you should pass these as uniforms)
-    let light_position = vec3<f32>(1.0, -5.0, 5.0);
-    let light_color = vec3<f32>(1.0, 1.0, 1.0);
-    let ambient_strength = 0.1;
-    let specular_strength = 0.5;
-    let shininess = 32.0;
-    
-    // Ambient component
-    let ambient = ambient_strength * light_color;
+
     
     // Diffuse component
     let light_dir = normalize(light_position - fragData.world_position.xyz);

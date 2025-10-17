@@ -1,4 +1,7 @@
-use glam::{Mat4, Vec3};
+use std::borrow::Cow;
+
+use encase::{StorageBuffer, UniformBuffer};
+use glam::{Mat4, Vec2, Vec3};
 use iced::{
     Element, Length, Point, Rectangle,
     advanced::Shell,
@@ -12,7 +15,7 @@ use iced::{
         self,
         shader::{
             self, Event, Primitive,
-            wgpu::{self},
+            wgpu::{self, ShaderModuleDescriptor},
         },
     },
 };
@@ -25,37 +28,22 @@ pub struct ViewportPrimitive {
     pub camera: CameraData,
 }
 
-impl ViewportPrimitive {
-    fn get_vertex_buffer(&self) -> Vec<f32> {
-        let mut verts = Vec::with_capacity(self.triangles.len() * 3 * (2 + 4)); // pos + color
-
-        for triangle in self.triangles.iter() {
-            for position in &[triangle.tri.a, triangle.tri.b, triangle.tri.c] {
-                {
-                    let color = triangle.color.to_array();
-                    verts.extend_from_slice(&position.to_array());
-                    verts.push(1.0);
-                    verts.extend_from_slice(&color);
-                    verts.push(1.0);
-                };
-            }
-        }
-
-        verts
-    }
-}
-
 #[derive(Debug)]
 pub struct TriangleWithColor {
     pub tri: Triangle,
     pub color: Vec3,
 }
 
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
-pub struct Uniforms {
-    view_proj: [f32; 4 * 4],
-    padding: [f32; 80], // Uniforms need to be min. 80 bytes, idk why
+impl TriangleWithColor {
+    fn to_vertices(&self) -> Vec<obj_shader::types::Vertex> {
+        [self.tri.a, self.tri.b, self.tri.c]
+            .into_iter()
+            .map(|position| obj_shader::types::Vertex {
+                position: position.extend(1.0),
+                color: self.color.extend(1.0),
+            })
+            .collect()
+    }
 }
 
 impl Primitive for ViewportPrimitive {
@@ -125,12 +113,11 @@ impl Primitive for ViewportPrimitive {
 
         pipeline.update(
             queue,
-            &Uniforms {
-                view_proj: view_proj.to_cols_array(),
-                padding: [0.0; 80],
+            obj_shader::types::MyUniforms {
+                view_proj: view_proj,
+                resolution: Vec2::new(target_size.width as f32, target_size.height as f32),
             },
-            &self.get_vertex_buffer(),
-            self.triangles.len() as u32 * 3,
+            &self.triangles,
         );
     }
 
@@ -148,6 +135,9 @@ impl Primitive for ViewportPrimitive {
     }
 }
 
+#[include_wgsl_oil::include_wgsl_oil("shader.wgsl")]
+mod obj_shader {}
+
 struct FragmentShaderPipeline {
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
@@ -163,7 +153,11 @@ impl FragmentShaderPipeline {
         format: shader::wgpu::TextureFormat,
         viewport: &shader::Viewport,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("objshader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::from(obj_shader::SOURCE)),
+        });
+
         let size = wgpu::Extent3d {
             width: viewport.physical_width(),
             height: viewport.physical_height(),
@@ -183,7 +177,8 @@ impl FragmentShaderPipeline {
 
         let depth_texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let vertex_attributes = [
+        let vertex_attributes: Vec<wgpu::VertexAttribute> = vec![
+            // my_shader::types::Vertex::min_size()
             wgpu::VertexAttribute {
                 offset: 0,
                 shader_location: 0,
@@ -236,7 +231,8 @@ impl FragmentShaderPipeline {
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shader_quad uniform buffer"),
-            size: std::mem::size_of::<Uniforms>() as u64,
+            size: std::mem::size_of::<obj_shader::types::MyUniforms>() as u64,
+            // size: 0,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -253,7 +249,7 @@ impl FragmentShaderPipeline {
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("shader_quad vertex buffer"),
-            size: std::mem::size_of::<[f32; 4 * 2]>() as u64 * 1024 * 4 * 10, // 40k vertices with pos+color
+            size: std::mem::size_of::<obj_shader::types::Vertex>() as u64 * 1024 * 40, // max 40k vertices
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -272,14 +268,29 @@ impl FragmentShaderPipeline {
     fn update(
         &mut self,
         queue: &wgpu::Queue,
-        uniforms: &Uniforms,
-        vertex_buffer: &[f32],
-        verts_count: u32,
+        uniforms: obj_shader::types::MyUniforms,
+        triangles: &Vec<TriangleWithColor>,
     ) {
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(uniforms));
-        queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertex_buffer));
-        self.verts_count = verts_count;
-        // println!("Updated verts: {:?}", vertex_buffer);
+        let uniform_buffer_data = {
+            let mut buffer = UniformBuffer::new(Vec::<u8>::new());
+            buffer.write(&uniforms).unwrap();
+            buffer.into_inner()
+        };
+        queue.write_buffer(&self.uniform_buffer, 0, &uniform_buffer_data);
+
+        let vertex_buffer_data = {
+            let mut buffer = StorageBuffer::new(Vec::<u8>::new());
+            let vertices = triangles
+                .iter()
+                .flat_map(|tri| tri.to_vertices())
+                .collect::<Vec<_>>();
+
+            buffer.write(&vertices).unwrap();
+            buffer.into_inner()
+        };
+        queue.write_buffer(&self.vertex_buffer, 0, &vertex_buffer_data);
+
+        self.verts_count = triangles.len() as u32 * 3;
     }
 
     fn render(
@@ -321,15 +332,6 @@ impl FragmentShaderPipeline {
             0.0,
             1.0,
         );
-        // Clear the viewport with a blue color
-        pass.set_scissor_rect(viewport.x, viewport.y, viewport.width, viewport.height);
-        let blue = wgpu::Color {
-            r: 0.0,
-            g: 0.1,
-            b: 0.2,
-            a: 1.0,
-        };
-        pass.set_blend_constant(blue);
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
