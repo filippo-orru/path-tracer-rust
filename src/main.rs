@@ -26,14 +26,12 @@ use crate::render::RenderUpdate;
 use crate::render::SceneData;
 use crate::render::render;
 use crate::render::scenes::load_scenes;
-use crate::render_tab::render_tab;
-use crate::viewport::ViewportMessage;
-use crate::viewport_tab::viewport_tab;
+use crate::views::render_tab::render_tab;
+use crate::views::viewport_tab::ViewportMessage;
+use crate::views::viewport_tab::viewport_tab;
 
 mod render;
-mod render_tab;
-mod viewport;
-mod viewport_tab;
+mod views;
 
 fn main() -> iced::Result {
     let application = application("Renderer", update, view);
