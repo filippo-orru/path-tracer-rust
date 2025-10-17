@@ -163,7 +163,8 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                                 // Move camera forward/backward along its direction
                                 let camera = &self.config.scene.camera;
                                 let direction = camera.direction();
-                                let position = camera.position + direction * y * 0.01;
+                                let magnitude = camera.position.length() * 0.002;
+                                let position = camera.position + direction * y * magnitude;
                                 return (
                                     event::Status::Captured,
                                     Some(ViewportMessage::Move(position)),
@@ -238,7 +239,8 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                                 let up = right.cross(direction).normalize();
                                 let move_vec = right * -x + up * y;
 
-                                let position = camera.position + move_vec * 0.005;
+                                let magnitude = camera.position.length() * 0.0002;
+                                let position = camera.position + move_vec * magnitude;
                                 return (
                                     event::Status::Captured,
                                     Some(ViewportMessage::Move(position)),

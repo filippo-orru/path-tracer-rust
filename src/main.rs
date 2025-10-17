@@ -1,11 +1,9 @@
 use async_std::task;
 use iced::Alignment;
 use iced::widget::text;
-use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 use iced::Element;
 use iced::Length;

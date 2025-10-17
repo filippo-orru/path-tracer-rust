@@ -10,7 +10,7 @@ use iced::{
     },
 };
 
-use crate::render::{RenderConfig, Triangle};
+use crate::render::{RenderConfig, Triangle, camera_data::CameraData};
 
 #[derive(Debug)]
 pub struct ViewportPrimitive {
@@ -373,21 +373,23 @@ impl ObjectFragmentShaderPipeline {
             projection * view
         };
 
-        let verts = {
-            config
-                .scene
-                .objects
-                .iter()
-                .flat_map(|object| {
-                    object.to_triangles().into_iter().flat_map(|tri| {
-                        TriangleWithColor {
-                            tri: tri.transformed(&object.position),
-                            color: object.material.color,
-                        }
-                        .to_vertices()
+        let verts: Vec<objects_shader::types::Vertex> = {
+            let grid_tris = Self::get_grid(&config.scene.camera);
+            let object_tris = config.scene.objects.iter().flat_map(|object| {
+                object
+                    .to_triangles()
+                    .into_iter()
+                    .map(|tri| TriangleWithColor {
+                        tri: tri.transformed(&object.position),
+                        color: object.material.color,
                     })
-                })
-                .collect()
+            });
+            let tris = grid_tris
+                .into_iter()
+                .chain(object_tris)
+                .flat_map(|tri| tri.to_vertices())
+                .collect();
+            tris
         };
 
         self.pipeline.update(
@@ -401,6 +403,40 @@ impl ObjectFragmentShaderPipeline {
             },
             verts,
         );
+    }
+
+    fn get_grid(camera: &CameraData) -> Vec<TriangleWithColor> {
+        let grid_lines = 5;
+        let zoom_level = camera.position.length() / 5.0;
+        let spacing = 10_i32.pow((zoom_level * 1.2 + 1.0).log10().floor() as u32) as f32;
+        // println!("zoom: {zoom_level}, spacing: {spacing}");
+        let line_width = 0.02 * zoom_level;
+
+        let mut tris = vec![];
+
+        for axis in [Vec3::X, Vec3::Z] {
+            let axis_vec = (axis, Vec3::new(0.0, 1.0, 0.0).cross(axis));
+
+            for i in -grid_lines..=grid_lines {
+                let offset = i as f32 * spacing;
+
+                // Create positions based on the current axis
+                let position1 = axis_vec.0 * (offset - line_width / 2.0)
+                    - axis_vec.1 * (grid_lines as f32 * spacing);
+                let position2 = axis_vec.0 * (offset + line_width / 2.0)
+                    - axis_vec.1 * (grid_lines as f32 * spacing);
+                let position3 = position1 + axis_vec.1 * (grid_lines as f32 * spacing * 2.0);
+                let position4 = position2 + axis_vec.1 * (grid_lines as f32 * spacing * 2.0);
+
+                let color = Vec3::new(0.5, 0.5, 0.5);
+
+                tris.extend(TriangleWithColor::from_quad(
+                    position1, position2, position4, position3, color,
+                ));
+            }
+        }
+
+        tris
     }
 }
 
@@ -475,6 +511,19 @@ pub struct TriangleWithColor {
 }
 
 impl TriangleWithColor {
+    fn from_quad(a: Vec3, b: Vec3, c: Vec3, d: Vec3, color: Vec3) -> Vec<TriangleWithColor> {
+        vec![
+            TriangleWithColor {
+                tri: Triangle { a, b, c },
+                color,
+            },
+            TriangleWithColor {
+                tri: Triangle { a, b: c, c: d },
+                color,
+            },
+        ]
+    }
+
     fn to_vertices(&self) -> Vec<objects_shader::types::Vertex> {
         [self.tri.a, self.tri.b, self.tri.c]
             .into_iter()
