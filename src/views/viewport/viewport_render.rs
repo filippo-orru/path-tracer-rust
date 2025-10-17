@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use encase::{ShaderSize, ShaderType, StorageBuffer, UniformBuffer, internal::WriteInto};
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 use iced::{
     Rectangle,
     widget::shader::{
@@ -18,8 +18,8 @@ pub struct ViewportPrimitive {
 }
 
 struct RenderPipelineCache {
-    objects: ObjectFragmentShaderPipeline,
     sky: SkyFragmentShaderPipeline,
+    objects: ObjectFragmentShaderPipeline,
     viewport: shader::Viewport,
 }
 impl RenderPipelineCache {
@@ -29,8 +29,8 @@ impl RenderPipelineCache {
         viewport: &shader::Viewport,
     ) -> Self {
         Self {
-            objects: ObjectFragmentShaderPipeline::new(device, format, viewport),
             sky: SkyFragmentShaderPipeline::new(device, format, viewport),
+            objects: ObjectFragmentShaderPipeline::new(device, format, viewport),
             viewport: viewport.clone(),
         }
     }
@@ -58,8 +58,8 @@ impl Primitive for ViewportPrimitive {
             *pipelines_cache = RenderPipelineCache::new(device, format, viewport);
         }
 
-        pipelines_cache.sky.update(queue);
-        // pipelines_cache.objects.update(queue, &self.config);
+        pipelines_cache.sky.update(queue, &self.config);
+        pipelines_cache.objects.update(queue, &self.config);
     }
 
     fn render(
@@ -76,10 +76,10 @@ impl Primitive for ViewportPrimitive {
             .pipeline
             .render(target, encoder, *clip_bounds);
 
-        // render_pipeline_cache
-        //     .objects
-        //     .pipeline
-        //     .render(target, encoder, *clip_bounds);
+        render_pipeline_cache
+            .objects
+            .pipeline
+            .render(target, encoder, *clip_bounds);
     }
 }
 
@@ -119,14 +119,15 @@ where
 {
     fn new(
         label: &str,
+        shader_source: &str,
         device: &shader::wgpu::Device,
         format: shader::wgpu::TextureFormat,
         viewport: &shader::Viewport,
         vertex_attributes: Option<Vec<wgpu::VertexFormat>>,
     ) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some(&format!("{label}_objshader")),
-            source: wgpu::ShaderSource::Wgsl(Cow::from(objects_shader::SOURCE)),
+            label: Some(&format!("{label}_shader")),
+            source: wgpu::ShaderSource::Wgsl(Cow::from(shader_source)),
         });
 
         let size = wgpu::Extent3d {
@@ -209,11 +210,11 @@ where
         });
 
         let uniform_struct_size = std::mem::size_of::<Uniforms>().max(80); // Uniforms must be at least 80 bytes
-        println!(
-            "Uniform struct size: {} (would be {})",
-            uniform_struct_size,
-            std::mem::size_of::<Uniforms>()
-        );
+        // println!(
+        //     "Uniform struct size: {} (would be {})",
+        //     uniform_struct_size,
+        //     std::mem::size_of::<Uniforms>()
+        // );
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!("{label}_uniform_buffer")),
             size: uniform_struct_size as u64,
@@ -249,11 +250,11 @@ where
         self.verts_count = verts.len() as u32;
 
         let uniform_buf = Self::uniform_buf(uniforms);
-        println!("Uploading {:?} to uniform buffer", &uniform_buf);
+        // println!("Uploading {:?} to uniform buffer", &uniform_buf);
         queue.write_buffer(&self.uniform_buffer, 0, &uniform_buf);
 
         let verts = Self::storage_buf(verts);
-        println!("Uploading {:?} to vertex buffer", verts);
+        // println!("Uploading {:?} to vertex buffer", verts);
         queue.write_buffer(&self.vertex_buffer, 0, &verts);
     }
 
@@ -299,7 +300,7 @@ where
         pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
-        println!("Drawing {} vertices", self.verts_count);
+        // println!("Drawing {} vertices", self.verts_count);
         pass.draw(0..self.verts_count, 0..1);
     }
 
@@ -341,7 +342,14 @@ impl ObjectFragmentShaderPipeline {
         viewport: &shader::Viewport,
     ) -> Self {
         Self {
-            pipeline: FragmentShaderPipeline::new("object", device, format, viewport, None),
+            pipeline: FragmentShaderPipeline::new(
+                "object",
+                objects_shader::SOURCE,
+                device,
+                format,
+                viewport,
+                None,
+            ),
         }
     }
 
@@ -386,10 +394,10 @@ impl ObjectFragmentShaderPipeline {
             queue,
             objects_shader::types::MyUniforms {
                 view_proj: view_proj,
-                resolution: Vec2::new(
-                    self.pipeline.viewport.physical_width() as f32,
-                    self.pipeline.viewport.physical_height() as f32,
-                ),
+                // resolution: Vec2::new(
+                //     self.pipeline.viewport.physical_width() as f32,
+                //     self.pipeline.viewport.physical_height() as f32,
+                // ),
             },
             verts,
         );
@@ -397,7 +405,7 @@ impl ObjectFragmentShaderPipeline {
 }
 
 struct SkyFragmentShaderPipeline {
-    pipeline: FragmentShaderPipeline<sky_shader::types::Uniforms, objects_shader::types::Vertex>,
+    pipeline: FragmentShaderPipeline<sky_shader::types::Uniforms, sky_shader::types::Vertex>,
 }
 impl SkyFragmentShaderPipeline {
     fn new(
@@ -406,41 +414,55 @@ impl SkyFragmentShaderPipeline {
         viewport: &shader::Viewport,
     ) -> Self {
         Self {
-            pipeline: FragmentShaderPipeline::new("sky", device, format, viewport, None),
+            pipeline: FragmentShaderPipeline::new(
+                "sky",
+                sky_shader::SOURCE,
+                device,
+                format,
+                viewport,
+                None,
+            ),
         }
     }
 
-    // TODO
-    // trying to fix the sky pipeline. it's not rendering anything
-    fn update(&mut self, queue: &wgpu::Queue) {
+    fn update(&mut self, queue: &wgpu::Queue, config: &RenderConfig) {
         let size = self.pipeline.viewport.physical_size();
-        let screen_size = Vec3::new(size.width as f32, size.height as f32, 1.0);
+
         self.pipeline.update(
             queue,
             sky_shader::types::Uniforms {
                 top_color: Vec3::new(0.2, 0.2, 0.2),
                 bottom_color: Vec3::new(0.13, 0.1, 0.1),
+                resolution: Vec2::new(size.width as f32, size.height as f32),
+                camera_direction: config.scene.camera.get_current_direction(),
             },
             vec![
                 TriangleWithColor {
                     tri: Triangle {
-                        a: Vec3::new(-1.0, -1.0, 0.0) * screen_size,
-                        b: Vec3::new(1.0, -1.0, 0.0) * screen_size,
-                        c: Vec3::new(1.0, 1.0, 0.0) * screen_size,
+                        a: Vec3::new(-1.0, -1.0, 0.0),
+                        b: Vec3::new(1.0, -1.0, 0.0),
+                        c: Vec3::new(1.0, 1.0, 0.0),
                     },
                     color: Vec3::new(1.0, 0.0, 0.0),
                 },
                 TriangleWithColor {
                     tri: Triangle {
-                        a: Vec3::new(-1.0, -1.0, 0.0) * screen_size,
-                        b: Vec3::new(1.0, 1.0, 0.0) * screen_size,
-                        c: Vec3::new(-1.0, 1.0, 0.0) * screen_size,
+                        a: Vec3::new(-1.0, -1.0, 0.0),
+                        b: Vec3::new(1.0, 1.0, 0.0),
+                        c: Vec3::new(-1.0, 1.0, 0.0),
                     },
                     color: Vec3::new(1.0, 0.0, 0.0),
                 },
             ]
             .into_iter()
-            .flat_map(|t| t.to_vertices())
+            .flat_map(|t| {
+                t.to_vertices()
+                    .into_iter()
+                    .map(|v| sky_shader::types::Vertex {
+                        position: v.position,
+                        color: v.color,
+                    })
+            })
             .collect(),
         );
     }

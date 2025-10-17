@@ -6,7 +6,6 @@ struct Light {
 
 @export struct MyUniforms {
 	view_proj: mat4x4<f32>,
-    resolution: vec2f,
 }
 // light: Light,
 

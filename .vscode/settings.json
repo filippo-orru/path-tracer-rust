@@ -9,5 +9,6 @@
         "titleBar.inactiveForeground": "#e7e7e799"
     },
     "peacock.color": "#505eda",
-    "editor.formatOnSave": true
+    "editor.formatOnSave": true,
+    "rust-analyzer.files.watcher": "server"
 }
