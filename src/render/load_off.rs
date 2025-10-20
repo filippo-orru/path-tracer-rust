@@ -5,7 +5,7 @@ use std::{
 
 use super::{Mesh, Triangle, Vec3};
 
-pub(crate) fn load_off(path: &str, scale: f32) -> Result<Mesh, std::io::Error> {
+pub fn load_off(path: &str, scale: f32) -> Result<Mesh, std::io::Error> {
     let file = File::open(path).unwrap();
     let mut reader = BufReader::new(file);
 

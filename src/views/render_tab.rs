@@ -17,7 +17,7 @@ use std::cell::RefCell;
 
 use crate::render::Image;
 use crate::render::Ray;
-use crate::render::RenderConfig;
+use crate::render::SceneData;
 use crate::render::SceneIntersectResult;
 use crate::render::gamma_correction;
 use crate::render::intersect_scene;
@@ -68,7 +68,7 @@ pub fn render_tab(state: &'_ State) -> Element<'_, Message> {
                         RenderState::Rendering { update, .. } => Some(update.progress),
                         RenderState::Done(_) => Some(1.0),
                     };
-                    RenderView::view(&state.render_config, image, progress)
+                    RenderView::view(&state.scene, image, progress)
                 },
                 widget::container(text(match &state.rendering {
                     RenderState::NotRendering => "".to_owned(),
@@ -143,19 +143,15 @@ pub fn render_tab(state: &'_ State) -> Element<'_, Message> {
 
 #[derive(Debug)]
 struct RenderView<'a> {
-    config: &'a RenderConfig,
+    scene: &'a SceneData,
     image: &'a Image,
     progress: Option<f32>,
 }
 
 impl<'a> RenderView<'a> {
-    fn view(
-        config: &'a RenderConfig,
-        image: &'a Image,
-        progress: Option<f32>,
-    ) -> Element<'a, Message> {
+    fn view(scene: &'a SceneData, image: &'a Image, progress: Option<f32>) -> Element<'a, Message> {
         canvas(RenderView {
-            config,
+            scene,
             image,
             progress,
         })
@@ -178,14 +174,14 @@ impl Default for CanvasCache {
         }
     }
 }
-fn test_scene_ray(relative_position: Point, config: &RenderConfig) {
-    let sensor_origin = config.scene.camera.position;
-    let lens_center = config.scene.camera.lens_center();
+fn test_scene_ray(relative_position: Point, scene: &SceneData) {
+    let sensor_origin = scene.camera.position;
+    let lens_center = scene.camera.lens_center();
 
     let sx: f32 = 1.0 - relative_position.x * 2.0;
     let sy: f32 = relative_position.y * 2.0 - 1.0;
 
-    let (su, sv) = config.scene.camera.orthogonals();
+    let (su, sv) = scene.camera.orthogonals();
 
     // 3d sample position on sensor
     let sensor_pos = sensor_origin + su * sx + sv * sy;
@@ -195,11 +191,11 @@ fn test_scene_ray(relative_position: Point, config: &RenderConfig) {
         origin: lens_center,
         direction: ray_direction,
     };
-    match intersect_scene(&ray, &config.scene.objects) {
+    match intersect_scene(&ray, &scene.objects) {
         SceneIntersectResult::Hit { object_id, hit } => {
             println!(
                 "Hit {:?} object at distance {}",
-                config.scene.objects[object_id].material, hit.distance
+                scene.objects[object_id].material, hit.distance
             );
         }
         SceneIntersectResult::NoHit => {
@@ -230,7 +226,7 @@ impl<Message> canvas::Program<Message> for RenderView<'_> {
                     //     "Canvas clicked, {} {}",
                     //     relative_position.x, relative_position.y
                     // );
-                    test_scene_ray(relative_position, &self.config);
+                    test_scene_ray(relative_position, &self.scene);
 
                     return (canvas::event::Status::Captured, None);
                 }

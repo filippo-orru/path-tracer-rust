@@ -21,6 +21,7 @@ use glam::Vec3;
 use iced::futures::{self, Sink, SinkExt, channel::mpsc::SendError};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::render::camera_data::CameraData;
 
@@ -66,18 +67,53 @@ pub struct Ray {
     pub direction: Vec3,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReflectType {
     Diffuse,
     Specular,
     Refract,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Material {
     pub color: Vec3,
     pub emmission: Vec3,
     pub reflect_type: ReflectType,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SceneDescriptor {
+    pub id: String,
+    pub objects: Vec<SceneObjectDescriptor>,
+    pub camera: CameraData,
+}
+
+impl SceneDescriptor {
+    pub fn load(id: &str) -> std::io::Result<SceneDescriptor> {
+        let filename = format!("scenes/{}.json", id);
+        let json = std::fs::read_to_string(filename)?;
+        let scene: SceneDescriptor = serde_json::from_str(&json).unwrap();
+        Ok(scene)
+    }
+
+    pub fn to_data(self) -> SceneData {
+        SceneData {
+            id: self.id,
+            objects: self
+                .objects
+                .into_iter()
+                .map(SceneObjectDescriptor::to_scene_object)
+                .collect(),
+            camera: self.camera,
+        }
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(&self).unwrap();
+        let filename = format!("scenes/{}.json", self.id);
+        std::fs::write(filename, json)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +121,31 @@ pub struct SceneData {
     pub id: String,
     pub objects: Vec<SceneObjectData>,
     pub camera: CameraData,
+}
+impl SceneData {
+    pub fn to_descriptor(&self) -> SceneDescriptor {
+        SceneDescriptor {
+            id: self.id.clone(),
+            objects: self
+                .objects
+                .iter()
+                .map(|obj| SceneObjectDescriptor {
+                    type_: match &obj.type_ {
+                        SceneObject::Sphere { radius } => {
+                            SceneObjectDescriptorType::Sphere { radius: *radius }
+                        }
+                        SceneObject::Mesh { mesh, file } => match file {
+                            Some(file) => SceneObjectDescriptorType::MeshFile(file.clone()),
+                            None => SceneObjectDescriptorType::Mesh(mesh.clone()),
+                        },
+                    },
+                    position: obj.position,
+                    material: obj.material.clone(),
+                })
+                .collect(),
+            camera: self.camera.clone(),
+        }
+    }
 }
 
 impl Display for SceneData {
@@ -95,8 +156,9 @@ impl Display for SceneData {
 
 pub mod camera_data {
     use glam::Vec3;
+    use serde::{Deserialize, Serialize};
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Serialize, Deserialize)]
     pub struct CameraData {
         pub position: Vec3,
 
@@ -165,6 +227,23 @@ pub mod camera_data {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SceneObjectDescriptor {
+    pub type_: SceneObjectDescriptorType,
+    pub position: Vec3,
+    pub material: Material,
+}
+
+impl SceneObjectDescriptor {
+    fn to_scene_object(self) -> SceneObjectData {
+        SceneObjectData {
+            type_: self.type_.to_scene_object(),
+            position: self.position,
+            material: self.material,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SceneObjectData {
     pub type_: SceneObject,
@@ -177,9 +256,7 @@ impl SceneObjectData {
         return match &self.type_ {
             SceneObject::Sphere { radius } => intersect_sphere(self.position, *radius, ray),
 
-            SceneObject::Mesh(mesh) =>
-            // {
-            {
+            SceneObject::Mesh { mesh, file: _ } => {
                 match intersect_sphere(
                     mesh.bounding_sphere.position + self.position,
                     mesh.bounding_sphere.radius,
@@ -265,62 +342,53 @@ impl SceneObjectData {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum SceneObject {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SceneObjectDescriptorType {
     Sphere { radius: f32 },
+    MeshFile(MeshFileDescriptor),
     Mesh(Mesh),
+}
+
+impl SceneObjectDescriptorType {
+    pub fn to_scene_object(self) -> SceneObject {
+        match self {
+            SceneObjectDescriptorType::Sphere { radius } => SceneObject::Sphere { radius },
+            SceneObjectDescriptorType::MeshFile(mesh_file) => {
+                let mesh = load_off::load_off(&mesh_file.path, mesh_file.scale).unwrap();
+                SceneObject::Mesh {
+                    mesh,
+                    file: Some(mesh_file),
+                }
+            }
+            SceneObjectDescriptorType::Mesh(mesh) => SceneObject::Mesh { mesh, file: None },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MeshFileDescriptor {
+    path: String,
+    scale: f32,
+}
+
+#[derive(Clone, Debug)]
+pub enum SceneObject {
+    Sphere {
+        radius: f32,
+    },
+    Mesh {
+        mesh: Mesh,
+        file: Option<MeshFileDescriptor>,
+    },
 }
 
 impl SceneObject {
     fn to_triangles(&self) -> Vec<Triangle> {
         match self {
             SceneObject::Sphere { radius } => sphere_to_triangles(*radius),
-            SceneObject::Mesh(mesh) => mesh.triangles.clone(),
+            SceneObject::Mesh { mesh, file: _ } => mesh.triangles.clone(),
         }
     }
-}
-
-fn sphere_bounding_box(radius: f32) -> (Vec3, Vec3) {
-    let min = Vec3::new(-radius, -radius, -radius);
-    let max = Vec3::new(radius, radius, radius);
-    return (min, max);
-}
-
-fn bounding_box_to_triangles(bounds: (Vec3, Vec3)) -> Vec<Triangle> {
-    let (min, max) = bounds;
-    let vertices = vec![
-        Vec3::new(min.x, min.y, min.z),
-        Vec3::new(max.x, min.y, min.z),
-        Vec3::new(max.x, max.y, min.z),
-        Vec3::new(min.x, max.y, min.z),
-        Vec3::new(min.x, min.y, max.z),
-        Vec3::new(max.x, min.y, max.z),
-        Vec3::new(max.x, max.y, max.z),
-        Vec3::new(min.x, max.y, max.z),
-    ];
-    let indices = vec![
-        (0, 1, 2),
-        (0, 2, 3), // front
-        (4, 6, 5),
-        (4, 7, 6), // back
-        (0, 4, 5),
-        (0, 5, 1), // bottom
-        (3, 2, 6),
-        (3, 6, 7), // top
-        (1, 5, 6),
-        (1, 6, 2), // right
-        (0, 3, 7),
-        (0, 7, 4), // left
-    ];
-    let mut triangles = vec![];
-    for (i1, i2, i3) in indices {
-        triangles.push(Triangle {
-            a: vertices[i1],
-            b: vertices[i2],
-            c: vertices[i3],
-        });
-    }
-    return triangles;
 }
 
 fn sphere_to_triangles(radius: f32) -> Vec<Triangle> {
@@ -383,7 +451,7 @@ fn sphere_to_triangles(radius: f32) -> Vec<Triangle> {
     return triangles;
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StandaloneSphere {
     position: Vec3,
     radius: f32,
@@ -417,8 +485,8 @@ fn intersect_sphere(position: Vec3, radius: f32, ray: &Ray) -> IntersectResult {
     });
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct Mesh {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Mesh {
     triangles: Vec<Triangle>,
     bounding_sphere: StandaloneSphere,
 }
@@ -473,7 +541,7 @@ impl Mesh {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Triangle {
     pub a: Vec3,
     pub b: Vec3,
@@ -734,7 +802,7 @@ fn render_pixel(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RenderConfig {
+pub struct RenderConfig {
     pub samples_per_pixel: usize,
     pub resolution: Resolution,
     pub scene: SceneData,

@@ -1,6 +1,6 @@
 use iced::{Element, widget::row};
 
-use crate::render::{Ray, RenderConfig, intersect_scene};
+use crate::render::{Ray, SceneData, intersect_scene};
 use crate::{Message, State, views::viewport::viewport_render::ViewportPrimitive};
 use glam::{Mat4, Vec3};
 use iced::{
@@ -19,7 +19,7 @@ use iced::{
 };
 
 pub fn viewport_tab(state: &'_ State) -> Element<'_, Message> {
-    row![ViewportProgram::view(&state.render_config).map(Message::ViewportMessage),]
+    row![ViewportProgram::view(&state.scene).map(Message::ViewportMessage),]
         .spacing(10)
         .into()
 }
@@ -45,12 +45,12 @@ struct OrbitingAround {
 }
 
 pub struct ViewportProgram<'a> {
-    pub config: &'a RenderConfig,
+    pub scene: &'a SceneData,
 }
 
 impl ViewportProgram<'_> {
-    pub fn view(config: &'_ RenderConfig) -> Element<'_, ViewportMessage> {
-        widget::shader(ViewportProgram { config: &config })
+    pub fn view(scene: &'_ SceneData) -> Element<'_, ViewportMessage> {
+        widget::shader(ViewportProgram { scene })
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -69,7 +69,7 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
         _bounds: iced::Rectangle,
     ) -> Self::Primitive {
         ViewportPrimitive {
-            config: self.config.clone(),
+            scene: self.scene.clone(),
         }
     }
 
@@ -129,11 +129,11 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
 
                     const PAN_SENSITIVITY: f32 = 1.0;
 
-                    let sensitivity = PAN_SENSITIVITY / self.config.resolution.height as f32;
+                    let sensitivity = PAN_SENSITIVITY / bounds.height as f32;
                     let yaw = -delta.x * sensitivity;
                     let pitch = -delta.y * sensitivity;
 
-                    let direction = self.config.scene.camera.direction();
+                    let direction = self.scene.camera.direction();
 
                     // Yaw rotation around the up vector
                     let yaw_matrix = Mat4::from_axis_angle(Vec3::Y, yaw);
@@ -161,7 +161,7 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                                 state.orbiting_around = None;
 
                                 // Move camera forward/backward along its direction
-                                let camera = &self.config.scene.camera;
+                                let camera = &self.scene.camera;
                                 let direction = camera.direction();
                                 let magnitude = camera.position.length() * 0.002;
                                 let position = camera.position + direction * y * magnitude;
@@ -172,8 +172,8 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                             }
                             ViewportModifierMode::Orbit => {
                                 // Orbit around the look-at point
-                                const SENSITIVITY: f32 = 0.0022;
-                                let camera = &self.config.scene.camera;
+                                const SENSITIVITY: f32 = 0.0018;
+                                let camera = &self.scene.camera;
                                 let lens_center = camera.lens_center();
                                 let direction = camera.direction();
                                 let ray = Ray {
@@ -183,8 +183,7 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                                 let orbit_center = match &state.orbiting_around {
                                     Some(center) => center.point,
                                     None => {
-                                        let intersect =
-                                            intersect_scene(&ray, &self.config.scene.objects);
+                                        let intersect = intersect_scene(&ray, &self.scene.objects);
 
                                         let orbit_distance = match intersect {
                                             crate::render::SceneIntersectResult::NoHit => {
@@ -233,7 +232,7 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
 
                                 // Move camera position in the view plane
 
-                                let camera = &self.config.scene.camera;
+                                let camera = &self.scene.camera;
                                 let direction = camera.direction();
                                 let right = direction.cross(Vec3::Y).normalize();
                                 let up = right.cross(direction).normalize();

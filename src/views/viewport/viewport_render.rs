@@ -10,11 +10,11 @@ use iced::{
     },
 };
 
-use crate::render::{RenderConfig, Triangle, camera_data::CameraData};
+use crate::render::{SceneData, Triangle, camera_data::CameraData};
 
 #[derive(Debug)]
 pub struct ViewportPrimitive {
-    pub config: RenderConfig,
+    pub scene: SceneData,
 }
 
 struct RenderPipelineCache {
@@ -58,8 +58,8 @@ impl Primitive for ViewportPrimitive {
             *pipelines_cache = RenderPipelineCache::new(device, format, viewport);
         }
 
-        pipelines_cache.sky.update(queue, &self.config);
-        pipelines_cache.objects.update(queue, &self.config);
+        pipelines_cache.sky.update(queue, &self.scene);
+        pipelines_cache.objects.update(queue, &self.scene);
     }
 
     fn render(
@@ -353,13 +353,13 @@ impl ObjectFragmentShaderPipeline {
         }
     }
 
-    fn update(&mut self, queue: &wgpu::Queue, config: &RenderConfig) {
+    fn update(&mut self, queue: &wgpu::Queue, scene: &SceneData) {
         // Create view matrix
         let view_proj = {
-            let sensor_origin: Vec3 = config.scene.camera.position;
-            let sensor_height: f32 = config.scene.camera.sensor_height();
-            let focal_length: f32 = config.scene.camera.focal_length;
-            let lens_center = config.scene.camera.lens_center();
+            let sensor_origin: Vec3 = scene.camera.position;
+            let sensor_height: f32 = scene.camera.sensor_height();
+            let focal_length: f32 = scene.camera.focal_length;
+            let lens_center = scene.camera.lens_center();
 
             let up = Vec3::new(0.0, 1.0, 0.0);
 
@@ -374,8 +374,8 @@ impl ObjectFragmentShaderPipeline {
         };
 
         let verts: Vec<objects_shader::types::Vertex> = {
-            let grid_tris = Self::get_grid(&config.scene.camera);
-            let object_tris = config.scene.objects.iter().flat_map(|object| {
+            let grid_tris = Self::get_grid(&scene.camera);
+            let object_tris = scene.objects.iter().flat_map(|object| {
                 object
                     .to_triangles()
                     .into_iter()
@@ -461,7 +461,7 @@ impl SkyFragmentShaderPipeline {
         }
     }
 
-    fn update(&mut self, queue: &wgpu::Queue, config: &RenderConfig) {
+    fn update(&mut self, queue: &wgpu::Queue, scene: &SceneData) {
         let size = self.pipeline.viewport.physical_size();
 
         self.pipeline.update(
@@ -470,7 +470,7 @@ impl SkyFragmentShaderPipeline {
                 top_color: Vec3::new(0.2, 0.2, 0.2),
                 bottom_color: Vec3::new(0.13, 0.1, 0.1),
                 resolution: Vec2::new(size.width as f32, size.height as f32),
-                camera_direction: config.scene.camera.get_current_direction(),
+                camera_direction: scene.camera.get_current_direction(),
             },
             vec![
                 TriangleWithColor {

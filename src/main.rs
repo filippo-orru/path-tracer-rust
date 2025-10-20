@@ -25,8 +25,9 @@ use crate::render::RenderDone;
 use crate::render::RenderUpdate;
 use crate::render::Resolution;
 use crate::render::SceneData;
+use crate::render::SceneDescriptor;
 use crate::render::render;
-use crate::render::scenes::load_scenes;
+use crate::render::scenes::load_scene_ids;
 use crate::views::render_tab::render_tab;
 use crate::views::viewport_tab::ViewportMessage;
 use crate::views::viewport_tab::viewport_tab;
@@ -53,16 +54,16 @@ fn main() -> iced::Result {
 struct State {
     renderer_channel: Option<mpsc::Sender<RendererInput>>,
 
-    scenes: Vec<SceneData>,
+    scene_ids: Vec<String>,
     scene_ids_selector: combo_box::State<String>,
-    selected_scene: Arc<SceneData>,
+    selected_scene_id: String,
 
     resolution_y_text: String,
     samples_text: String,
 
     config_has_error: Option<String>,
 
-    render_config: RenderConfig,
+    scene: SceneData,
     rendering: RenderState,
     empty_image: Image,
 
@@ -71,26 +72,23 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let scenes = load_scenes();
+        let scene_ids = load_scene_ids();
         let initial_id = "mesh";
-        let mesh = scenes.iter().find(|s| s.id == initial_id).unwrap().clone();
-        let selected_scene = Arc::new(mesh.clone());
+        let initial_scene_id = scene_ids
+            .iter()
+            .find(|id| *id == initial_id)
+            .unwrap_or(&scene_ids[0]);
+        let initial_scene = SceneDescriptor::load(initial_scene_id).unwrap().to_data();
+        // let selected_scene = Arc::new(mesh.to_data());
         Self {
             renderer_channel: None,
-            scene_ids_selector: combo_box::State::with_selection(
-                scenes.iter().map(|scene| scene.id.clone()).collect(),
-                None, // Some(selected_scene_id.clone()).as_ref(),
-            ),
-            selected_scene,
-            scenes,
+            scene_ids_selector: combo_box::State::with_selection(scene_ids.clone(), None),
+            scene_ids,
+            selected_scene_id: initial_scene.id.clone(),
             resolution_y_text: "300".to_owned(),
             samples_text: "100".to_owned(),
             config_has_error: None,
-            render_config: RenderConfig {
-                samples_per_pixel: 100,
-                resolution: Resolution::default(),
-                scene: mesh.clone(),
-            },
+            scene: initial_scene,
             rendering: RenderState::NotRendering,
             empty_image: Image {
                 pixels: vec![],
@@ -119,6 +117,7 @@ enum RenderState {
 enum Message {
     StartRender,
     StopRender,
+    SaveScene,
     SwitchTab(Tab),
     RenderWorkerMessage(RenderWorkerMessage),
     SelectScene(String),
@@ -166,7 +165,14 @@ fn update(state: &mut State, message: Message) {
                     }
 
                     state.rendering = RenderState::Pending;
-                    let config = state.render_config.clone();
+                    let config = RenderConfig {
+                        samples_per_pixel: spp,
+                        resolution: Resolution {
+                            height: res_y,
+                            width: res_y * 3 / 2,
+                        },
+                        scene: state.scene.clone(),
+                    };
                     if let Some(channel) = &mut state.renderer_channel {
                         let _ = channel.try_send(RendererInput::StartRendering { config });
                     }
@@ -181,48 +187,38 @@ fn update(state: &mut State, message: Message) {
         }
         Message::StopRender => stop_render(state),
         Message::SelectScene(id) => {
-            if let Some(scene) = state.scenes.iter().find(|s| s.id == id) {
-                state.selected_scene = Arc::new(scene.clone());
-                state.render_config.scene = scene.clone();
+            if state.scene_ids.contains(&id) {
+                state.selected_scene_id = id.clone();
+                state.scene = SceneDescriptor::load(&id).unwrap().to_data();
                 state.rendering = RenderState::NotRendering;
             } else {
                 state.config_has_error = Some(format!("Scene with id '{}' not found", id));
             }
         }
         Message::UpdateResolutionY(value) => {
-            let val = value.parse::<usize>().unwrap_or(300);
-            state.render_config.resolution.height = val;
-            state.render_config.resolution.width = val * 3 / 2;
-
             state.resolution_y_text = value;
         }
         Message::UpdateSamplesPerPixel(value) => {
-            state.render_config.samples_per_pixel = value.parse::<usize>().unwrap_or(100);
             state.samples_text = value;
         }
         Message::ViewportMessage(viewport_message) => {
             // println!("Viewport message: {:?}", viewport_message);
             match viewport_message {
                 ViewportMessage::LookAround(direction) => {
-                    state
-                        .render_config
-                        .scene
-                        .camera
-                        .set_updating_direction(direction);
+                    state.scene.camera.set_updating_direction(direction);
                 }
                 ViewportMessage::CommitLookAround => {
                     state
-                        .render_config
                         .scene
                         .camera
-                        .set_direction(state.render_config.scene.camera.get_current_direction());
+                        .set_direction(state.scene.camera.get_current_direction());
                 }
                 ViewportMessage::Move(position) => {
-                    state.render_config.scene.camera.position = position;
+                    state.scene.camera.position = position;
                 }
                 ViewportMessage::Orbit { position, rotation } => {
-                    state.render_config.scene.camera.position = position;
-                    state.render_config.scene.camera.set_direction(rotation);
+                    state.scene.camera.position = position;
+                    state.scene.camera.set_direction(rotation);
                 }
             }
         }
@@ -237,13 +233,41 @@ fn update(state: &mut State, message: Message) {
             }
         },
         Message::SwitchTab(tab) => state.tab = tab,
+        Message::SaveScene => {
+            let current_scene_descriptor = state.scene.to_descriptor();
+            if let Err(e) = current_scene_descriptor.save() {
+                // TODO: proper error handling, show popup
+                state.config_has_error = Some(format!("Failed to save scene: {}", e));
+            }
+        }
     };
 }
 
 fn view(state: &State) -> Element<'_, Message> {
     return container(
         column![
-            row![
+            column![
+                row![
+                    container(
+                        row![
+                            text("Scene"),
+                            combo_box(
+                                &state.scene_ids_selector,
+                                "Select scene",
+                                Some(&state.selected_scene_id), // TODO use state.scene
+                                Message::SelectScene
+                            )
+                            .width(120),
+                        ]
+                        .align_y(Alignment::Center)
+                        .spacing(4)
+                    ),
+                    button("Save")
+                        .style(button::secondary)
+                        .padding([2, 4])
+                        .on_press(Message::SaveScene),
+                ]
+                .spacing(10),
                 row![
                     button("Viewport")
                         .style(if matches!(state.tab, Tab::Viewport) {
@@ -252,6 +276,7 @@ fn view(state: &State) -> Element<'_, Message> {
                             button::secondary
                         })
                         .padding([2, 4])
+                        .width(Length::Fill)
                         .on_press(Message::SwitchTab(Tab::Viewport)),
                     button("Render")
                         .style(if matches!(state.tab, Tab::Render) {
@@ -260,28 +285,12 @@ fn view(state: &State) -> Element<'_, Message> {
                             button::secondary
                         })
                         .padding([2, 4])
+                        .width(Length::Fill)
                         .on_press(Message::SwitchTab(Tab::Render)),
                 ]
                 .spacing(10)
-                .align_y(Alignment::Center),
-                container(
-                    row![
-                        text("Scene"),
-                        combo_box(
-                            &state.scene_ids_selector,
-                            "Select scene",
-                            Some(&state.selected_scene.id),
-                            Message::SelectScene
-                        )
-                        .width(120),
-                    ]
-                    .align_y(Alignment::Center)
-                    .spacing(4)
-                )
-                .width(Length::Fill),
             ]
-            .spacing(24)
-            .align_y(Alignment::Center)
+            .spacing(10)
             .padding([2, 4]),
             container(match state.tab {
                 Tab::Viewport => {

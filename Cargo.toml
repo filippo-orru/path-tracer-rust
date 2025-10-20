@@ -10,8 +10,10 @@ iced = { version = "0.13.1", features = ["canvas", "async-std", "advanced"] }
 rand = "0.8.5"
 chrono = "0.4.19"
 rayon = "1.5.1"
-glam = { version = "0.30.8", features = ["encase"] }
+glam = { version = "0.30.8", features = ["encase", "serde"] }
 async-std = "1.13.2"
 include-wgsl-oil = { version = "0.2.9", features = ["encase", "glam"] }
 encase = "0.12.0"
 env_logger = "0.11.8"
+serde_json = "1.0.145"
+serde = { version = "1.0.228", features = ["derive"] }
