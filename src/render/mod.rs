@@ -252,7 +252,7 @@ pub struct SceneObjectData {
 }
 
 impl SceneObjectData {
-    fn intersect(&self, ray: &Ray) -> Option<Hit> {
+    pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
         return match &self.type_ {
             SceneObject::Sphere { radius } => intersect_sphere(self.position, *radius, ray),
 
@@ -265,71 +265,20 @@ impl SceneObjectData {
                 )
                 .is_some()
                 {
-                    // Initialize variables to track closest hit
-                    let mut closest_hit: Option<Hit> = None;
-
-                    for original_tri in mesh.triangles.iter() {
-                        let tri = original_tri.transformed(&self.position);
-                        let va_vb = tri.b - tri.a;
-                        let va_vc = tri.c - tri.a;
-
-                        let pvec = ray.direction.cross(va_vc);
-                        let determinant = va_vb.dot(pvec);
-
-                        if USE_CULLING {
-                            if determinant < 1e-4 {
-                                continue;
-                            }
-                        } else {
-                            if determinant.abs() < 1e-4 {
-                                continue;
-                            }
-                        }
-
-                        let inv_determinant = 1.0 / determinant;
-                        let tvec = ray.origin - tri.a;
-                        let u: f32 = tvec.dot(pvec) * inv_determinant;
-                        if u < 0.0 || u > 1.0 {
-                            continue;
-                        }
-
-                        let qvec = tvec.cross(va_vb);
-                        let v: f32 = ray.direction.dot(qvec) * inv_determinant;
-                        if v < 0.0 || (u + v) > 1.0 {
-                            continue;
-                        }
-
-                        let distance: f32 = va_vc.dot(qvec) * inv_determinant;
-
-                        // Skip negative distances (hits behind the ray origin)
-                        if distance <= 0.0 {
-                            continue;
-                        }
-
-                        // Only update if this hit is closer than the previous closest
-                        let is_closest_hit = match &closest_hit {
-                            Some(hit) => distance < hit.distance,
-                            None => true,
-                        };
-
-                        if is_closest_hit {
-                            // Calculate proper intersection point using ray equation
-                            let intersection = ray.origin + ray.direction * distance;
-                            let normal = va_vb.cross(va_vc).normalize();
-
-                            closest_hit = Some(Hit {
-                                distance,
-                                intersection,
-                                normal,
-                            });
-                        }
-                    }
-
-                    // Return the closest hit, or NoHit if none was found
-                    closest_hit
+                    Triangle::intersect(ray, self.position, &mesh.triangles)
                 } else {
                     None
                 }
+            }
+        };
+    }
+
+    pub fn intersect_bounds(&self, ray: &Ray) -> Option<Hit> {
+        return match &self.type_ {
+            SceneObject::Sphere { radius } => intersect_sphere(self.position, *radius, ray),
+
+            SceneObject::Mesh { mesh, file: _ } => {
+                Triangle::intersect(ray, self.position, &mesh.bounding_box)
             }
         };
     }
@@ -588,19 +537,82 @@ pub struct Triangle {
 }
 
 impl Triangle {
-    pub fn transformed(&self, v: &Vec3) -> Triangle {
+    pub fn transformed(&self, v: Vec3) -> Triangle {
         Triangle {
-            a: self.a + *v,
-            b: self.b + *v,
-            c: self.c + *v,
+            a: self.a + v,
+            b: self.b + v,
+            c: self.c + v,
         }
+    }
+
+    pub fn intersect(ray: &Ray, offset: Vec3, triangles: &Vec<Triangle>) -> Option<Hit> {
+        // Initialize variables to track closest hit
+        let mut closest_hit: Option<Hit> = None;
+
+        for original_tri in triangles.iter() {
+            let tri = original_tri.transformed(offset);
+            let va_vb = tri.b - tri.a;
+            let va_vc = tri.c - tri.a;
+
+            let pvec = ray.direction.cross(va_vc);
+            let determinant = va_vb.dot(pvec);
+
+            if USE_CULLING {
+                if determinant < 1e-4 {
+                    continue;
+                }
+            } else {
+                if determinant.abs() < 1e-4 {
+                    continue;
+                }
+            }
+
+            let inv_determinant = 1.0 / determinant;
+            let tvec = ray.origin - tri.a;
+            let u: f32 = tvec.dot(pvec) * inv_determinant;
+            if u < 0.0 || u > 1.0 {
+                continue;
+            }
+
+            let qvec = tvec.cross(va_vb);
+            let v: f32 = ray.direction.dot(qvec) * inv_determinant;
+            if v < 0.0 || (u + v) > 1.0 {
+                continue;
+            }
+
+            let distance: f32 = va_vc.dot(qvec) * inv_determinant;
+
+            // Skip negative distances (hits behind the ray origin)
+            if distance <= 0.0 {
+                continue;
+            }
+
+            // Only update if this hit is closer than the previous closest
+            let is_closest_hit = match &closest_hit {
+                Some(hit) => distance < hit.distance,
+                None => true,
+            };
+
+            if is_closest_hit {
+                // Calculate proper intersection point using ray equation
+                let intersection = ray.origin + ray.direction * distance;
+                let normal = va_vb.cross(va_vc).normalize();
+
+                closest_hit = Some(Hit {
+                    distance,
+                    intersection,
+                    normal,
+                });
+            }
+        }
+        closest_hit
     }
 }
 
 #[derive(PartialEq, Debug)]
 pub struct Hit {
     pub distance: f32,
-    intersection: Vec3,
+    pub intersection: Vec3,
     normal: Vec3,
 }
 

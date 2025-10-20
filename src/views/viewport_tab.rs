@@ -1,6 +1,6 @@
 use iced::{Element, widget::row};
 
-use crate::render::{Ray, SceneData, SceneIntersectResult, intersect_scene};
+use crate::render::{Hit, Ray, SceneData, SceneObjectData};
 use crate::{Message, State, views::viewport::viewport_render::ViewportPrimitive};
 use glam::{Mat4, Vec3};
 use iced::{
@@ -183,14 +183,13 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                                 let orbit_center = match &state.orbiting_around {
                                     Some(center) => center.point,
                                     None => {
-                                        let intersect = intersect_scene(&ray, &self.scene.objects);
+                                        let intersect = get_orbit_point(&ray, &self.scene.objects);
 
-                                        let orbit_distance = match intersect {
-                                            None => lens_center.length(), // Fallback to distance based on zoom
-                                            Some(SceneIntersectResult { hit, .. }) => hit.distance,
+                                        let orbit_center = match intersect {
+                                            None => lens_center + direction * lens_center.length(), // Fallback to distance based on zoom
+                                            Some(hit_position) => hit_position,
                                         };
 
-                                        let orbit_center = lens_center + direction * orbit_distance;
                                         state.orbiting_around = Some(OrbitingAround {
                                             point: orbit_center,
                                             cursor: cursor.position().unwrap(),
@@ -256,4 +255,40 @@ pub enum ViewportMessage {
     CommitLookAround,
     Move(Vec3),
     Orbit { position: Vec3, rotation: Vec3 },
+}
+
+/// Gets point around which to orbit by finding the closest object by its bounding box,
+///  and then checking for the actual intersection.
+/// This is done, so a mesh in the screen center can be orbited around, even if there is
+///  no triangle exactly in the center of the screen.
+fn get_orbit_point(ray: &Ray, scene_objects: &Vec<SceneObjectData>) -> Option<Vec3> {
+    let mut min_intersect: Option<Hit> = None;
+
+    for i in (0..scene_objects.len()).rev() {
+        let scene_object = &scene_objects[i];
+        let intersect_bounds = scene_object.intersect_bounds(ray);
+        match intersect_bounds {
+            None => (),
+            Some(hit_bounds) => {
+                let hit_object = scene_object.intersect(ray);
+                // Use the actual object hit if available, otherwise use the bounding box hit
+                let new_hit = match hit_object {
+                    Some(hit) => hit,
+                    None => hit_bounds,
+                };
+
+                match &min_intersect {
+                    Some(hit) => {
+                        if new_hit.distance < hit.distance {
+                            min_intersect = Some(new_hit);
+                        }
+                    }
+                    None => {
+                        min_intersect = Some(new_hit);
+                    }
+                }
+            }
+        }
+    }
+    return min_intersect.map(|hit| hit.intersection);
 }

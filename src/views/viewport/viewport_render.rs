@@ -380,7 +380,7 @@ impl ObjectFragmentShaderPipeline {
                     .to_triangles()
                     .into_iter()
                     .map(|tri| TriangleWithColor {
-                        tri: tri.transformed(&object.position),
+                        tri: tri.transformed(object.position),
                         color: object.material.color,
                     })
             });
