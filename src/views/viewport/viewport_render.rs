@@ -10,11 +10,15 @@ use iced::{
     },
 };
 
-use crate::render::{SceneData, Triangle, camera_data::CameraData};
+use crate::{
+    render::{SceneData, Triangle, camera_data::CameraData},
+    views::viewport_tab::ViewportState,
+};
 
 #[derive(Debug)]
 pub struct ViewportPrimitive {
     pub scene: SceneData,
+    pub viewport_state: ViewportState,
 }
 
 struct RenderPipelineCache {
@@ -65,7 +69,9 @@ impl Primitive for ViewportPrimitive {
         }
 
         pipelines_cache.sky.update(queue, &self.scene);
-        pipelines_cache.objects.update(queue, &self.scene);
+        pipelines_cache
+            .objects
+            .update(queue, &self.scene, &self.viewport_state);
     }
 
     fn render(
@@ -364,7 +370,7 @@ impl ObjectFragmentShaderPipeline {
         }
     }
 
-    fn update(&mut self, queue: &wgpu::Queue, scene: &SceneData) {
+    fn update(&mut self, queue: &wgpu::Queue, scene: &SceneData, viewport_state: &ViewportState) {
         // Create view matrix
         let aspect_ratio =
             self.pipeline.target_size.width as f32 / self.pipeline.target_size.height as f32;
@@ -372,18 +378,57 @@ impl ObjectFragmentShaderPipeline {
 
         let verts: Vec<objects_shader::types::Vertex> = {
             let grid_tris = Self::get_grid(&scene.camera);
-            let object_tris = scene.objects.iter().flat_map(|object| {
-                object
-                    .to_triangles()
-                    .into_iter()
-                    .map(|tri| TriangleWithColor {
-                        tri: tri.transformed(object.position),
-                        color: object.material.color,
-                    })
-            });
+            let object_tris = scene
+                .objects
+                .iter()
+                .enumerate()
+                .flat_map(|(object_id, object)| {
+                    object
+                        .to_triangles()
+                        .into_iter()
+                        .map(move |tri| TriangleWithColor {
+                            tri: tri.transformed(object.position),
+                            color: if viewport_state.selected_object == Some(object_id) {
+                                Vec3::new(1.0, 0.0, 0.0)
+                            } else {
+                                object.material.color
+                            },
+                        })
+                });
+            // let ray_tris = if let Some(ray) = &viewport_state.last_ray {
+            //     const RAY_WIDTH: f32 = 0.01;
+            //     // let ray = Ray {
+            //     //     origin: scene.camera.lens_center(),
+            //     //     direction: ray.direction,
+            //     // };
+            //     let start = ray.origin;
+            //     let end = ray.origin + ray.direction * 10.0;
+            //     vec![
+            //         TriangleWithColor {
+            //             tri: Triangle {
+            //                 a: start,
+            //                 b: end,
+            //                 c: end + Vec3::new(RAY_WIDTH, 0.0, 0.0),
+            //             },
+            //             color: Vec3::new(0.0, 1.0, 0.0),
+            //         },
+            //         TriangleWithColor {
+            //             tri: Triangle {
+            //                 a: start,
+            //                 b: end + Vec3::new(RAY_WIDTH, 0.0, 0.0),
+            //                 c: start + Vec3::new(RAY_WIDTH, 0.0, 0.0),
+            //             },
+            //             color: Vec3::new(0.0, 1.0, 0.0),
+            //         },
+            //     ]
+            // } else {
+            //     vec![]
+            // };
+
             let tris = grid_tris
                 .into_iter()
                 .chain(object_tris)
+                // .chain(ray_tris)
                 .flat_map(|tri| tri.to_vertices())
                 .collect();
             tris

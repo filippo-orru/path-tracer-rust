@@ -62,6 +62,7 @@ pub fn to_int_with_gamma_correction(x: f32) -> usize {
     return (255.0 * gamma_correction(x) + 0.5) as usize;
 }
 
+#[derive(Debug, Clone)]
 pub struct Ray {
     pub origin: Vec3,
     pub direction: Vec3,

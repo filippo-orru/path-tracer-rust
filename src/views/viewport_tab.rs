@@ -60,9 +60,9 @@ pub struct ViewportProgram<'a> {
     pub viewport_state: &'a ViewportState,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ViewportState {
-    selected_object: Option<usize>,
+    pub selected_object: Option<usize>,
     modifier_mode: ViewportModifierMode,
 }
 
@@ -76,8 +76,8 @@ impl ViewportState {
 
     pub fn update(&mut self, message: &ViewportStateMessage) {
         match message {
-            ViewportStateMessage::SelectObject(object_id) => {
-                self.selected_object = *object_id;
+            ViewportStateMessage::SelectObject { id } => {
+                self.selected_object = *id;
             }
             ViewportStateMessage::SetModifierMode(viewport_modifier_mode) => {
                 self.modifier_mode = viewport_modifier_mode.clone();
@@ -104,13 +104,7 @@ impl ViewportProgram<'_> {
                 .width(Length::Fill)
                 .height(Length::Fill),
                 container(match viewport_state.modifier_mode {
-                    ViewportModifierMode::DefaultOrbit { .. } => match viewport_state
-                        .selected_object
-                    {
-                        Some(object_id) =>
-                            widget::text(format!("Selected Object ID: {} -- Orbiting", object_id)),
-                        None => widget::text("Orbiting"),
-                    },
+                    ViewportModifierMode::DefaultOrbit { .. } => widget::text("Orbiting"),
                     ViewportModifierMode::Zoom => widget::text("Zooming"),
                     ViewportModifierMode::Pan => widget::text("Panning"),
                     ViewportModifierMode::LookAround => widget::text("Looking Around"),
@@ -118,41 +112,66 @@ impl ViewportProgram<'_> {
             ]
             .spacing(3),
             // Sidebar
-            container(
-                widget::container(
-                    column(
-                        scene
-                            .objects
-                            .iter()
-                            .enumerate()
-                            .map(|(index, object)| {
-                                widget::text(format!(
-                                    "{} {}",
-                                    index,
-                                    match object.type_ {
-                                        crate::render::SceneObject::Sphere { .. } => "Sphere",
-                                        crate::render::SceneObject::Mesh { .. } => "Mesh",
-                                    }
-                                ))
-                                .into()
+            container(column![
+                column(
+                    scene
+                        .objects
+                        .iter()
+                        .enumerate()
+                        .map(|(index, object)| {
+                            container(widget::text(format!(
+                                "{} {}",
+                                index,
+                                match object.type_ {
+                                    crate::render::SceneObject::Sphere { .. } => "Sphere",
+                                    crate::render::SceneObject::Mesh { .. } => "Mesh",
+                                }
+                            )))
+                            .style(if viewport_state.selected_object == Some(index) {
+                                |theme: &Theme| Style {
+                                    background: Some(theme.palette().primary.into()),
+                                    text_color: Some(Color::WHITE),
+                                    ..Default::default()
+                                }
+                            } else {
+                                |_: &Theme| Style::default()
                             })
-                            .collect::<Vec<_>>()
-                    )
-                    .spacing(10),
+                            .into()
+                        })
+                        .collect::<Vec<_>>()
                 )
-                .style(|theme: &Theme| Style {
+                .spacing(10),
+                // Divider
+                container(widget::text("")).style(|theme: &Theme| Style {
                     border: border::color(Color {
                         a: 0.5,
                         ..theme.palette().text
                     })
                     .width(1)
-                    .rounded(5),
+                    .rounded(0),
                     ..Default::default()
+                }),
+                column![widget::text(format!(
+                    "Selected Object: {}",
+                    match viewport_state.selected_object {
+                        Some(id) => id.to_string(),
+                        None => "None".to_string(),
+                    }
+                )),]
+                .spacing(10),
+            ],)
+            .style(|theme: &Theme| Style {
+                border: border::color(Color {
+                    a: 0.5,
+                    ..theme.palette().text
                 })
-                .padding(10)
-                .width(250)
-                .height(Length::Fill),
-            ),
+                .width(1)
+                .rounded(5),
+                ..Default::default()
+            })
+            .padding(10)
+            .width(250)
+            .height(Length::Fill),
         ]
         .spacing(10)
         .into()
@@ -172,6 +191,7 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
     ) -> Self::Primitive {
         ViewportPrimitive {
             scene: self.scene.clone(),
+            viewport_state: self.viewport_state.clone(),
         }
     }
 
@@ -212,24 +232,18 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                     let aspect_ratio = bounds.width as f32 / bounds.height as f32;
                     let view_proj = camera.get_view_projection(aspect_ratio);
 
-                    let x_adj = pos.x - bounds.x;
-                    let y_adj = pos.y - bounds.y;
-                    let screen_space_vec = Vec3::new(
-                        (x_adj / bounds.width as f32) * 2.0 - 1.0,
-                        1.0 - (y_adj / bounds.height as f32) * 2.0,
-                        1.0,
-                    );
-                    println!("Screen Space Vec: {:?}", screen_space_vec);
+                    let x_adj = (pos.x - bounds.x) / bounds.width * 2.0 - 1.0;
+                    let y_adj = (bounds.height - pos.y + bounds.y) / bounds.height * 2.0 - 1.0;
+                    let screen_space_vec = Vec3::new(x_adj, y_adj, 1.0);
                     let inv_view_proj = view_proj.inverse();
-                    let world_space_vec = inv_view_proj.transform_vector3(screen_space_vec);
-                    println!("World Space Vec: {:?}", world_space_vec);
+                    let world_space_vec = inv_view_proj.project_point3(screen_space_vec);
                     let ray = Ray {
                         origin: camera.lens_center(),
                         direction: (world_space_vec - camera.position).normalize(),
                     };
-                    let msg = ViewportMessage::StateMessage(ViewportStateMessage::SelectObject(
-                        intersect_scene(&ray, &self.scene.objects).map(|hit| hit.object_id),
-                    ));
+                    let msg = ViewportMessage::StateMessage(ViewportStateMessage::SelectObject {
+                        id: intersect_scene(&ray, &self.scene.objects).map(|hit| hit.object_id),
+                    });
                     return (event::Status::Captured, Some(msg));
                 }
             }
@@ -376,7 +390,7 @@ pub enum ViewportMessage {
 
 #[derive(Debug, Clone)]
 pub enum ViewportStateMessage {
-    SelectObject(Option<usize>),
+    SelectObject { id: Option<usize> },
     SetModifierMode(ViewportModifierMode),
 }
 
