@@ -1,6 +1,6 @@
 use iced::{Element, widget::row};
 
-use crate::render::{Ray, SceneData, intersect_scene};
+use crate::render::{Ray, SceneData, SceneIntersectResult, intersect_scene};
 use crate::{Message, State, views::viewport::viewport_render::ViewportPrimitive};
 use glam::{Mat4, Vec3};
 use iced::{
@@ -186,14 +186,8 @@ impl shader::Program<ViewportMessage> for ViewportProgram<'_> {
                                         let intersect = intersect_scene(&ray, &self.scene.objects);
 
                                         let orbit_distance = match intersect {
-                                            crate::render::SceneIntersectResult::NoHit => {
-                                                // Fallback to distance based on zoom
-                                                lens_center.length()
-                                            }
-                                            crate::render::SceneIntersectResult::Hit {
-                                                hit,
-                                                ..
-                                            } => hit.distance,
+                                            None => lens_center.length(), // Fallback to distance based on zoom
+                                            Some(SceneIntersectResult { hit, .. }) => hit.distance,
                                         };
 
                                         let orbit_center = lens_center + direction * orbit_distance;

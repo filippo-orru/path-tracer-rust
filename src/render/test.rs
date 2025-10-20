@@ -57,14 +57,14 @@ fn test_intersect_scene() {
 
     assert_eq!(
         intersection,
-        SceneIntersectResult::Hit {
+        Some(SceneIntersectResult {
             object_id: 0,
             hit: Hit {
                 distance: 2.0,
                 intersection: Vec3::new(0.0, 0.0, -2.0),
                 normal: Vec3::new(0.0, 0.0, 1.0),
             }
-        }
+        })
     );
 }
 
@@ -83,7 +83,7 @@ fn test_ray_misses_sphere() {
     }];
 
     let intersection = intersect_scene(&ray, &scene);
-    assert_eq!(intersection, SceneIntersectResult::NoHit);
+    assert_eq!(intersection, None);
 }
 
 // Test a ray originating inside the sphere
@@ -104,14 +104,14 @@ fn test_ray_inside_sphere() {
     // Expected result should account for intersection from inside the sphere
     assert_eq!(
         intersection,
-        SceneIntersectResult::Hit {
+        Some(SceneIntersectResult {
             object_id: 0,
             hit: Hit {
                 distance: 1.0,
                 intersection: Vec3::new(0.0, 0.0, -1.0),
                 normal: Vec3::new(0.0, 0.0, -1.0),
             }
-        }
+        })
     );
 }
 
@@ -132,14 +132,14 @@ fn test_ray_tangent_to_sphere() {
     let intersection = intersect_scene(&ray, &scene);
     assert_eq!(
         intersection,
-        SceneIntersectResult::Hit {
+        Some(SceneIntersectResult {
             object_id: 0,
             hit: Hit {
                 distance: 3.0,
                 intersection: Vec3::new(0.0, 1.0, -3.0),
                 normal: Vec3::new(0.0, 1.0, 0.0),
             }
-        }
+        })
     );
 }
 

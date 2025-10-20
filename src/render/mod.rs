@@ -252,86 +252,83 @@ pub struct SceneObjectData {
 }
 
 impl SceneObjectData {
-    fn intersect(&self, ray: &Ray) -> IntersectResult {
+    fn intersect(&self, ray: &Ray) -> Option<Hit> {
         return match &self.type_ {
             SceneObject::Sphere { radius } => intersect_sphere(self.position, *radius, ray),
 
             SceneObject::Mesh { mesh, file: _ } => {
-                match intersect_sphere(
+                // Performance: first test against bounding sphere
+                if intersect_sphere(
                     mesh.bounding_sphere.position + self.position,
                     mesh.bounding_sphere.radius,
                     ray,
-                ) {
-                    IntersectResult::NoHit => IntersectResult::NoHit,
-                    IntersectResult::Hit(_) => {
-                        // println!("Mesh intersection test");
+                )
+                .is_some()
+                {
+                    // Initialize variables to track closest hit
+                    let mut closest_hit: Option<Hit> = None;
 
-                        // Initialize variables to track closest hit
-                        let mut closest_hit: Option<Hit> = None;
+                    for original_tri in mesh.triangles.iter() {
+                        let tri = original_tri.transformed(&self.position);
+                        let va_vb = tri.b - tri.a;
+                        let va_vc = tri.c - tri.a;
 
-                        for original_tri in mesh.triangles.iter() {
-                            let tri = original_tri.transformed(&self.position);
-                            let va_vb = tri.b - tri.a;
-                            let va_vc = tri.c - tri.a;
+                        let pvec = ray.direction.cross(va_vc);
+                        let determinant = va_vb.dot(pvec);
 
-                            let pvec = ray.direction.cross(va_vc);
-                            let determinant = va_vb.dot(pvec);
-
-                            if USE_CULLING {
-                                if determinant < 1e-4 {
-                                    continue;
-                                }
-                            } else {
-                                if determinant.abs() < 1e-4 {
-                                    continue;
-                                }
-                            }
-
-                            let inv_determinant = 1.0 / determinant;
-                            let tvec = ray.origin - tri.a;
-                            let u: f32 = tvec.dot(pvec) * inv_determinant;
-                            if u < 0.0 || u > 1.0 {
+                        if USE_CULLING {
+                            if determinant < 1e-4 {
                                 continue;
                             }
-
-                            let qvec = tvec.cross(va_vb);
-                            let v: f32 = ray.direction.dot(qvec) * inv_determinant;
-                            if v < 0.0 || (u + v) > 1.0 {
+                        } else {
+                            if determinant.abs() < 1e-4 {
                                 continue;
-                            }
-
-                            let distance: f32 = va_vc.dot(qvec) * inv_determinant;
-
-                            // Skip negative distances (hits behind the ray origin)
-                            if distance <= 0.0 {
-                                continue;
-                            }
-
-                            // Only update if this hit is closer than the previous closest
-                            let is_closest_hit = match &closest_hit {
-                                Some(hit) => distance < hit.distance,
-                                None => true,
-                            };
-
-                            if is_closest_hit {
-                                // Calculate proper intersection point using ray equation
-                                let intersection = ray.origin + ray.direction * distance;
-                                let normal = va_vb.cross(va_vc).normalize();
-
-                                closest_hit = Some(Hit {
-                                    distance,
-                                    intersection,
-                                    normal,
-                                });
                             }
                         }
 
-                        // Return the closest hit, or NoHit if none was found
-                        match closest_hit {
-                            Some(hit) => IntersectResult::Hit(hit),
-                            None => IntersectResult::NoHit,
+                        let inv_determinant = 1.0 / determinant;
+                        let tvec = ray.origin - tri.a;
+                        let u: f32 = tvec.dot(pvec) * inv_determinant;
+                        if u < 0.0 || u > 1.0 {
+                            continue;
+                        }
+
+                        let qvec = tvec.cross(va_vb);
+                        let v: f32 = ray.direction.dot(qvec) * inv_determinant;
+                        if v < 0.0 || (u + v) > 1.0 {
+                            continue;
+                        }
+
+                        let distance: f32 = va_vc.dot(qvec) * inv_determinant;
+
+                        // Skip negative distances (hits behind the ray origin)
+                        if distance <= 0.0 {
+                            continue;
+                        }
+
+                        // Only update if this hit is closer than the previous closest
+                        let is_closest_hit = match &closest_hit {
+                            Some(hit) => distance < hit.distance,
+                            None => true,
+                        };
+
+                        if is_closest_hit {
+                            // Calculate proper intersection point using ray equation
+                            let intersection = ray.origin + ray.direction * distance;
+                            let normal = va_vb.cross(va_vc).normalize();
+
+                            closest_hit = Some(Hit {
+                                distance,
+                                intersection,
+                                normal,
+                            });
                         }
                     }
+
+                    // Return the closest hit, or NoHit if none was found
+                    closest_hit
+                } else {
+                    None
                 }
             }
         };
@@ -366,7 +363,7 @@ impl SceneObjectDescriptorType {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct MeshFileDescriptor {
+pub struct MeshFileDescriptor {
     path: String,
     scale: f32,
 }
@@ -457,13 +454,13 @@ struct StandaloneSphere {
     radius: f32,
 }
 
-fn intersect_sphere(position: Vec3, radius: f32, ray: &Ray) -> IntersectResult {
+fn intersect_sphere(position: Vec3, radius: f32, ray: &Ray) -> Option<Hit> {
     let op: Vec3 = position - ray.origin;
     let eps: f32 = 1e-4;
     let b = op.dot(ray.direction);
     let mut det = b.powi(2) - op.dot(op) + radius.powi(2);
     if det < 0.0 {
-        return IntersectResult::NoHit;
+        return None;
     } else {
         det = det.sqrt();
     }
@@ -472,13 +469,13 @@ fn intersect_sphere(position: Vec3, radius: f32, ray: &Ray) -> IntersectResult {
     } else if b + det >= eps {
         b + det
     } else {
-        return IntersectResult::NoHit;
+        return None;
     };
 
     let xmin = ray.origin + ray.direction * t;
     let nmin = (xmin - position).normalize();
 
-    return IntersectResult::Hit(Hit {
+    return Some(Hit {
         distance: t,
         intersection: xmin,
         normal: nmin,
@@ -488,7 +485,11 @@ fn intersect_sphere(position: Vec3, radius: f32, ray: &Ray) -> IntersectResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mesh {
     triangles: Vec<Triangle>,
+
+    // TODO
+    // these fields can be computed instead of serialize + deserialize. Maybe use some `lazy` thing
     bounding_sphere: StandaloneSphere,
+    bounding_box: Vec<Triangle>,
 }
 
 impl Mesh {
@@ -537,8 +538,46 @@ impl Mesh {
         Mesh {
             triangles,
             bounding_sphere,
+            bounding_box: bounding_box_to_triangles((min_vert, max_vert)),
         }
     }
+}
+
+fn bounding_box_to_triangles(bounds: (Vec3, Vec3)) -> Vec<Triangle> {
+    let (min, max) = bounds;
+    let vertices = vec![
+        Vec3::new(min.x, min.y, min.z),
+        Vec3::new(max.x, min.y, min.z),
+        Vec3::new(max.x, max.y, min.z),
+        Vec3::new(min.x, max.y, min.z),
+        Vec3::new(min.x, min.y, max.z),
+        Vec3::new(max.x, min.y, max.z),
+        Vec3::new(max.x, max.y, max.z),
+        Vec3::new(min.x, max.y, max.z),
+    ];
+    let indices = vec![
+        (0, 1, 2),
+        (0, 2, 3), // front
+        (4, 6, 5),
+        (4, 7, 6), // back
+        (0, 4, 5),
+        (0, 5, 1), // bottom
+        (3, 2, 6),
+        (3, 6, 7), // top
+        (1, 5, 6),
+        (1, 6, 2), // right
+        (0, 3, 7),
+        (0, 7, 4), // left
+    ];
+    let mut triangles = vec![];
+    for (i1, i2, i3) in indices {
+        triangles.push(Triangle {
+            a: vertices[i1],
+            b: vertices[i2],
+            c: vertices[i3],
+        });
+    }
+    return triangles;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -565,37 +604,35 @@ pub struct Hit {
     normal: Vec3,
 }
 
-enum IntersectResult {
-    NoHit,
-    Hit(Hit),
-}
-
 #[derive(PartialEq, Debug)]
-pub enum SceneIntersectResult {
-    NoHit,
-    Hit { object_id: usize, hit: Hit },
+pub struct SceneIntersectResult {
+    pub object_id: usize,
+    pub hit: Hit,
 }
 
-pub fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObjectData>) -> SceneIntersectResult {
-    let mut min_intersect: SceneIntersectResult = SceneIntersectResult::NoHit;
+pub fn intersect_scene(
+    ray: &Ray,
+    scene_objects: &Vec<SceneObjectData>,
+) -> Option<SceneIntersectResult> {
+    let mut min_intersect: Option<SceneIntersectResult> = None;
 
     for i in (0..scene_objects.len()).rev() {
         let scene_object = &scene_objects[i];
         let intersect = scene_object.intersect(ray);
         match (intersect, &min_intersect) {
-            (IntersectResult::NoHit, _) => (),
-            (IntersectResult::Hit(new_hit), SceneIntersectResult::NoHit) => {
-                min_intersect = SceneIntersectResult::Hit {
+            (None, _) => (),
+            (Some(new_hit), None) => {
+                min_intersect = Some(SceneIntersectResult {
                     object_id: i,
                     hit: new_hit,
-                };
+                });
             }
-            (IntersectResult::Hit(new_hit), SceneIntersectResult::Hit { hit, .. }) => {
+            (Some(new_hit), Some(SceneIntersectResult { hit, .. })) => {
                 if new_hit.distance < hit.distance {
-                    min_intersect = SceneIntersectResult::Hit {
+                    min_intersect = Some(SceneIntersectResult {
                         object_id: i,
                         hit: new_hit,
-                    };
+                    });
                 }
             }
         }
@@ -606,8 +643,8 @@ pub fn intersect_scene(ray: &Ray, scene_objects: &Vec<SceneObjectData>) -> Scene
 const MAX_DEPTH: usize = 12;
 fn radiance(ray: &Ray, depth: usize, scene_objects: &Vec<SceneObjectData>) -> Vec3 {
     return match intersect_scene(&ray, scene_objects) {
-        SceneIntersectResult::NoHit => Vec3::default(),
-        SceneIntersectResult::Hit { object_id, hit } => {
+        None => Vec3::default(),
+        Some(SceneIntersectResult { object_id, hit }) => {
             let object = &scene_objects[object_id];
             let mut color: Vec3 = object.material.color;
             let max_reflection = color.x.max(color.y.max(color.z));

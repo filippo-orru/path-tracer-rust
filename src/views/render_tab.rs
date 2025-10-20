@@ -192,13 +192,13 @@ fn test_scene_ray(relative_position: Point, scene: &SceneData) {
         direction: ray_direction,
     };
     match intersect_scene(&ray, &scene.objects) {
-        SceneIntersectResult::Hit { object_id, hit } => {
+        Some(SceneIntersectResult { object_id, hit }) => {
             println!(
                 "Hit {:?} object at distance {}",
                 scene.objects[object_id].material, hit.distance
             );
         }
-        SceneIntersectResult::NoHit => {
+        None => {
             println!("No hit");
         }
     }
