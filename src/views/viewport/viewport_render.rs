@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use encase::{ShaderSize, ShaderType, StorageBuffer, UniformBuffer, internal::WriteInto};
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Vec2, Vec3};
 use iced::{
     Rectangle,
     widget::shader::{
@@ -27,10 +27,11 @@ impl RenderPipelineCache {
         device: &shader::wgpu::Device,
         format: shader::wgpu::TextureFormat,
         viewport: &shader::Viewport,
+        target_size: &Rectangle,
     ) -> Self {
         Self {
-            sky: SkyFragmentShaderPipeline::new(device, format, viewport),
-            objects: ObjectFragmentShaderPipeline::new(device, format, viewport),
+            sky: SkyFragmentShaderPipeline::new(device, format, viewport, target_size),
+            objects: ObjectFragmentShaderPipeline::new(device, format, viewport, target_size),
             viewport: viewport.clone(),
         }
     }
@@ -43,19 +44,24 @@ impl Primitive for ViewportPrimitive {
         queue: &shader::wgpu::Queue,
         format: shader::wgpu::TextureFormat,
         storage: &mut shader::Storage,
-        _target_size: &iced::Rectangle,
+        target_size: &iced::Rectangle,
         viewport: &shader::Viewport,
     ) {
         // Check if viewport size changed
         if !storage.has::<RenderPipelineCache>() {
-            storage.store(RenderPipelineCache::new(device, format, viewport));
+            storage.store(RenderPipelineCache::new(
+                device,
+                format,
+                viewport,
+                target_size,
+            ));
         }
 
         let pipelines_cache = storage.get_mut::<RenderPipelineCache>().unwrap();
         if pipelines_cache.viewport.physical_height() != viewport.physical_height()
             || pipelines_cache.viewport.physical_width() != viewport.physical_width()
         {
-            *pipelines_cache = RenderPipelineCache::new(device, format, viewport);
+            *pipelines_cache = RenderPipelineCache::new(device, format, viewport, target_size);
         }
 
         pipelines_cache.sky.update(queue, &self.scene);
@@ -108,6 +114,7 @@ struct FragmentShaderPipeline<
     verts_count: u32,
     depth_texture_view: wgpu::TextureView,
     viewport: shader::Viewport,
+    target_size: Rectangle,
     _uniforms_marker: PhantomData<Uniforms>,
     _vert_marker: PhantomData<Vert>,
 }
@@ -123,6 +130,7 @@ where
         device: &shader::wgpu::Device,
         format: shader::wgpu::TextureFormat,
         viewport: &shader::Viewport,
+        target_size: &Rectangle,
         vertex_attributes: Option<Vec<wgpu::VertexFormat>>,
     ) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
@@ -241,6 +249,7 @@ where
             verts_count: 0,
             depth_texture_view,
             viewport: viewport.clone(),
+            target_size: target_size.clone(),
             _uniforms_marker: PhantomData,
             _vert_marker: PhantomData,
         }
@@ -340,6 +349,7 @@ impl ObjectFragmentShaderPipeline {
         device: &shader::wgpu::Device,
         format: shader::wgpu::TextureFormat,
         viewport: &shader::Viewport,
+        target_size: &Rectangle,
     ) -> Self {
         Self {
             pipeline: FragmentShaderPipeline::new(
@@ -348,6 +358,7 @@ impl ObjectFragmentShaderPipeline {
                 device,
                 format,
                 viewport,
+                target_size,
                 None,
             ),
         }
@@ -355,23 +366,9 @@ impl ObjectFragmentShaderPipeline {
 
     fn update(&mut self, queue: &wgpu::Queue, scene: &SceneData) {
         // Create view matrix
-        let view_proj = {
-            let sensor_origin: Vec3 = scene.camera.position;
-            let sensor_height: f32 = scene.camera.sensor_height();
-            let focal_length: f32 = scene.camera.focal_length;
-            let lens_center = scene.camera.lens_center();
-
-            let up = Vec3::new(0.0, 1.0, 0.0);
-
-            let view = Mat4::look_at_rh(sensor_origin, lens_center, up);
-            let fov = 2.0 * (sensor_height / (2.0 * focal_length)).atan();
-
-            let aspect_ratio = self.pipeline.viewport.physical_width() as f32
-                / self.pipeline.viewport.physical_height() as f32;
-            let projection = Mat4::perspective_rh(fov, aspect_ratio, 0.001, 1000.0);
-
-            projection * view
-        };
+        let aspect_ratio =
+            self.pipeline.target_size.width as f32 / self.pipeline.target_size.height as f32;
+        let view_proj = scene.camera.get_view_projection(aspect_ratio);
 
         let verts: Vec<objects_shader::types::Vertex> = {
             let grid_tris = Self::get_grid(&scene.camera);
@@ -396,10 +393,6 @@ impl ObjectFragmentShaderPipeline {
             queue,
             objects_shader::types::MyUniforms {
                 view_proj: view_proj,
-                // resolution: Vec2::new(
-                //     self.pipeline.viewport.physical_width() as f32,
-                //     self.pipeline.viewport.physical_height() as f32,
-                // ),
             },
             verts,
         );
@@ -448,6 +441,7 @@ impl SkyFragmentShaderPipeline {
         device: &shader::wgpu::Device,
         format: shader::wgpu::TextureFormat,
         viewport: &shader::Viewport,
+        target_size: &Rectangle,
     ) -> Self {
         Self {
             pipeline: FragmentShaderPipeline::new(
@@ -456,6 +450,7 @@ impl SkyFragmentShaderPipeline {
                 device,
                 format,
                 viewport,
+                target_size,
                 None,
             ),
         }
@@ -470,7 +465,7 @@ impl SkyFragmentShaderPipeline {
                 top_color: Vec3::new(0.2, 0.2, 0.2),
                 bottom_color: Vec3::new(0.13, 0.1, 0.1),
                 resolution: Vec2::new(size.width as f32, size.height as f32),
-                camera_direction: scene.camera.get_current_direction(),
+                camera_direction: scene.camera.direction(),
             },
             vec![
                 TriangleWithColor {

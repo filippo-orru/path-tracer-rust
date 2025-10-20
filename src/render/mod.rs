@@ -155,7 +155,7 @@ impl Display for SceneData {
 }
 
 pub mod camera_data {
-    use glam::Vec3;
+    use glam::{Mat4, Vec3};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,7 +164,6 @@ pub mod camera_data {
 
         /// normal to sensor plane
         direction: Vec3,
-        updating_direction: Option<Vec3>,
 
         /// in meters
         pub focal_length: f32,
@@ -179,11 +178,26 @@ pub mod camera_data {
             Self {
                 position,
                 direction: direction.normalize(),
-                updating_direction: None,
                 focal_length: 0.035,
                 sensor_width: 0.036,
                 aspect_ratio: 3.0 / 2.0,
             }
+        }
+
+        pub fn get_view_projection(&self, aspect_ratio: f32) -> Mat4 {
+            // println!(
+            //     "Getting view projection with aspect ratio: {}",
+            //     aspect_ratio
+            // );
+            let sensor_origin: Vec3 = self.position;
+            let sensor_height: f32 = self.sensor_height();
+            let focal_length: f32 = self.focal_length;
+            let lens_center = self.lens_center();
+            let up = Vec3::new(0.0, 1.0, 0.0);
+            let view = Mat4::look_at_rh(sensor_origin, lens_center, up);
+            let fov = 2.0 * (sensor_height / (2.0 * focal_length)).atan();
+            let projection = Mat4::perspective_rh(fov, aspect_ratio, 0.001, 1000.0);
+            projection * view
         }
 
         pub fn direction(&self) -> Vec3 {
@@ -191,15 +205,6 @@ pub mod camera_data {
         }
         pub fn set_direction(&mut self, direction: Vec3) {
             self.direction = direction.normalize();
-            self.updating_direction = None;
-        }
-
-        pub fn get_current_direction(&self) -> Vec3 {
-            self.updating_direction.unwrap_or(self.direction)
-        }
-        pub fn set_updating_direction(&mut self, direction: Vec3) {
-            self.updating_direction = Some(direction.normalize());
-            // println!("Current direction: {:?}", self.get_current_direction());
         }
 
         pub fn sensor_height(&self) -> f32 {
@@ -208,12 +213,12 @@ pub mod camera_data {
 
         /// lens center (pinhole)
         pub fn lens_center(&self) -> Vec3 {
-            self.position + self.get_current_direction() * self.focal_length
+            self.position + self.direction() * self.focal_length
         }
 
         /// Returns (su, sv), two orthogonal vectors spanning the sensor plane, scaled by the sensor dimensions.
         pub fn orthogonals(&self) -> (Vec3, Vec3) {
-            let direction = self.get_current_direction();
+            let direction = self.direction();
             let su = direction
                 .cross(if direction.y.abs() < 0.9 {
                     Vec3::new(0.0, 1.0, 0.0)

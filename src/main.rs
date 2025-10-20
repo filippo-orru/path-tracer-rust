@@ -30,6 +30,7 @@ use crate::render::render;
 use crate::render::scenes::load_scene_ids;
 use crate::views::render_tab::render_tab;
 use crate::views::viewport_tab::ViewportMessage;
+use crate::views::viewport_tab::ViewportState;
 use crate::views::viewport_tab::viewport_tab;
 
 mod render;
@@ -68,6 +69,8 @@ struct State {
     empty_image: Image,
 
     tab: Tab,
+
+    viewport_state: ViewportState,
 }
 
 impl Default for State {
@@ -99,6 +102,7 @@ impl Default for State {
                 hash: 0,
             },
             tab: Tab::Viewport,
+            viewport_state: ViewportState::new(),
         }
     }
 }
@@ -205,20 +209,25 @@ fn update(state: &mut State, message: Message) {
             // println!("Viewport message: {:?}", viewport_message);
             match viewport_message {
                 ViewportMessage::LookAround(direction) => {
-                    state.scene.camera.set_updating_direction(direction);
+                    state.scene.camera.set_direction(direction);
                 }
-                ViewportMessage::CommitLookAround => {
-                    state
-                        .scene
-                        .camera
-                        .set_direction(state.scene.camera.get_current_direction());
-                }
+
                 ViewportMessage::Move(position) => {
                     state.scene.camera.position = position;
                 }
-                ViewportMessage::Orbit { position, rotation } => {
+                ViewportMessage::Orbit {
+                    position,
+                    rotation,
+                    update_orbit,
+                } => {
                     state.scene.camera.position = position;
                     state.scene.camera.set_direction(rotation);
+                    if let Some(orbit) = update_orbit {
+                        state.viewport_state.update_orbit(orbit);
+                    }
+                }
+                ViewportMessage::StateMessage(viewport_state_message) => {
+                    state.viewport_state.update(&viewport_state_message);
                 }
             }
         }
