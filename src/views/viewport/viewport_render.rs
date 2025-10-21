@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use encase::{ShaderSize, ShaderType, internal::WriteInto};
-use glam::{Vec2, Vec3};
+use glam::{Vec2, Vec3, Vec4};
 use iced::{
     Rectangle,
     widget::shader::{
@@ -10,18 +10,13 @@ use iced::{
     },
 };
 use lazy_static::lazy_static;
+use std::marker::PhantomData;
+use wesl::include_wesl;
 
 use crate::{
     render::{SceneData, Triangle, camera_data::CameraData},
-    views::{
-        viewport::viewport_render::objects_types_shader::types::Vertex, viewport_tab::ViewportState,
-    },
+    views::viewport_tab::ViewportState,
 };
-
-use std::marker::PhantomData;
-
-#[include_wgsl_oil::include_wgsl_oil("shaders/sky.wgsl")]
-mod sky_shader {}
 
 #[derive(Debug)]
 pub struct ViewportPrimitive {
@@ -70,8 +65,7 @@ impl Primitive for ViewportPrimitive {
 struct RenderPipelines {
     sky_layer: SkyLayer,
     objects_layer: ObjectsLayer,
-    intermediate_texture: wgpu::Texture,
-
+    // intermediate_texture: wgpu::Texture,
     intermediate_texture_view: wgpu::TextureView,
     outline_layer: OutlineLayer,
     viewport: shader::Viewport,
@@ -113,7 +107,7 @@ impl RenderPipelines {
             ),
             objects_layer,
             intermediate_texture_view,
-            intermediate_texture,
+            // intermediate_texture,
             viewport: viewport.clone(),
         }
     }
@@ -134,6 +128,7 @@ impl RenderPipelines {
             label: Some("objects_renderpass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &self.intermediate_texture_view,
+                // view: &target,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
@@ -144,7 +139,7 @@ impl RenderPipelines {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.objects_layer.depth_texture_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -300,20 +295,22 @@ impl<Uniforms: WriteInto + ShaderType> UniformBuffer<Uniforms> {
     }
 }
 
-#[include_wgsl_oil::include_wgsl_oil("shaders/objects_types.wgsl")]
-mod objects_types_shader {}
+#[derive(Debug, Clone, Copy, ShaderType)]
+struct Vertex {
+    position: Vec4,
+    color: Vec4,
+}
 
-#[include_wgsl_oil::include_wgsl_oil("shaders/objects.wgsl")]
-mod objects_shader {}
-
-#[include_wgsl_oil::include_wgsl_oil("shaders/outline.wgsl")]
-mod outline_shader {}
+#[derive(Debug, Clone, Copy, ShaderType)]
+struct ObjectUniforms {
+    view_proj: glam::Mat4,
+}
 
 struct ObjectsLayer {
     depth_texture_view: wgpu::TextureView,
     vertex_buffer: VertexBuffer<Vertex>,
 
-    pipeline: FragmentShaderPipeline<objects_shader::types::Uniforms>,
+    pipeline: FragmentShaderPipeline<ObjectUniforms>,
 
     target_size: Rectangle,
 }
@@ -366,7 +363,7 @@ impl ObjectsLayer {
         //  consider making the buffer smaller and drawing meshes in chunks
         Self {
             pipeline: {
-                let shader_source: &str = objects_shader::SOURCE;
+                let shader_source: &str = include_wesl!("objects");
                 let shader = device.create_shader_module(ShaderModuleDescriptor {
                     label: Some(&format!("{label}_shader")),
                     source: wgpu::ShaderSource::Wgsl(Cow::from(shader_source)),
@@ -466,7 +463,7 @@ impl ObjectsLayer {
 
         self.pipeline
             .uniform_buffer
-            .set_data(queue, objects_shader::types::Uniforms { view_proj });
+            .set_data(queue, ObjectUniforms { view_proj });
         self.vertex_buffer.set_data(queue, &verts);
     }
 
@@ -507,8 +504,13 @@ impl ObjectsLayer {
     }
 }
 
+#[derive(Debug, Clone, Copy, ShaderType)]
+struct OutlineUniforms {
+    pub outline_color: Vec3,
+}
+
 struct OutlineLayer {
-    pipeline: FragmentShaderPipeline<outline_shader::types::Uniforms>,
+    pipeline: FragmentShaderPipeline<OutlineUniforms>,
     vertex_buffer: VertexBuffer<Vertex>,
 }
 
@@ -523,7 +525,7 @@ impl OutlineLayer {
         let label: &str = "outline";
         Self {
             pipeline: {
-                let shader_source: &str = outline_shader::SOURCE;
+                let shader_source: &str = include_wesl!("outline");
                 let shader = device.create_shader_module(ShaderModuleDescriptor {
                     label: Some(&format!("{label}_shader")),
                     source: wgpu::ShaderSource::Wgsl(Cow::from(shader_source)),
@@ -614,20 +616,20 @@ impl OutlineLayer {
                             binding: 1,
                             resource: wgpu::BindingResource::TextureView(&depth_texture_view),
                         },
+                        // wgpu::BindGroupEntry {
+                        //     binding: 2,
+                        //     resource: wgpu::BindingResource::Sampler(&depth_sampler),
+                        // },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&depth_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: wgpu::BindingResource::Sampler(&color_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
                             resource: wgpu::BindingResource::TextureView(
                                 &intermediate_texture_view,
                             ),
                         },
+                        // wgpu::BindGroupEntry {
+                        //     binding: 3,
+                        //     resource: wgpu::BindingResource::Sampler(&color_sampler),
+                        // },
                     ],
                 });
 
@@ -645,7 +647,7 @@ impl OutlineLayer {
     fn update(&mut self, queue: &wgpu::Queue) {
         self.pipeline.uniform_buffer.set_data(
             queue,
-            outline_shader::types::Uniforms {
+            OutlineUniforms {
                 outline_color: Vec3::new(0.0, 1.0, 0.0),
             },
         );
@@ -677,8 +679,16 @@ lazy_static! {
     .collect();
 }
 
+#[derive(Debug, Clone, Copy, ShaderType)]
+pub struct SkyUniforms {
+    pub top_color: Vec3,
+    pub bottom_color: Vec3,
+    pub resolution: Vec2,
+    pub camera_direction: Vec3,
+}
+
 struct SkyLayer {
-    pipeline: FragmentShaderPipeline<sky_shader::types::Uniforms>,
+    pipeline: FragmentShaderPipeline<SkyUniforms>,
     vertex_buffer: VertexBuffer<Vertex>,
 }
 impl SkyLayer {
@@ -694,7 +704,7 @@ impl SkyLayer {
 
         Self {
             pipeline: {
-                let shader_source: &str = sky_shader::SOURCE;
+                let shader_source: &str = include_wesl!("sky");
                 let shader = device.create_shader_module(ShaderModuleDescriptor {
                     label: Some(&format!("{label}_shader")),
                     source: wgpu::ShaderSource::Wgsl(Cow::from(shader_source)),
@@ -783,7 +793,7 @@ impl SkyLayer {
 
         self.pipeline.uniform_buffer.set_data(
             queue,
-            sky_shader::types::Uniforms {
+            SkyUniforms {
                 top_color: Vec3::new(0.2, 0.2, 0.2),
                 bottom_color: Vec3::new(0.13, 0.1, 0.1),
                 resolution: Vec2::new(size.width as f32, size.height as f32),

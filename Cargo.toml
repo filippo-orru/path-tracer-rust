@@ -12,9 +12,12 @@ chrono = "0.4.19"
 rayon = "1.5.1"
 glam = { version = "0.30.8", features = ["encase", "serde"] }
 async-std = "1.13.2"
-include-wgsl-oil = { version = "0.2.9", features = ["encase", "glam"] }
 encase = "0.12.0"
 env_logger = "0.11.8"
 serde_json = "1.0.145"
 serde = { version = "1.0.228", features = ["derive"] }
 lazy_static = "1.5.0"
+wesl = "0.2.0"
+
+[build-dependencies]
+wesl = { version = "0.2.0", features = ["package"] }

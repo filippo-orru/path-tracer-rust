@@ -1,4 +1,4 @@
-#import objects_types.wgsl as types;
+import super::objects_types::{Vertex};
 
 struct Light {
     position: vec3<f32>,
@@ -6,8 +6,8 @@ struct Light {
     intensity: f32,
 }
 
-@export struct Uniforms {
-	view_proj: mat4x4<f32>,
+struct Uniforms {
+    view_proj: mat4x4<f32>,
 }
 // light: Light,
 
@@ -15,7 +15,7 @@ struct Light {
 
 @vertex
 fn vertex_main(
-    vert: types::Vertex,
+    vert: Vertex,
 ) -> VertexOut {
     var position = vert.position;
 
@@ -31,10 +31,10 @@ fn vertex_main(
 }
 
 struct VertexOut {
-	@builtin(position) position: vec4f,
-    @location(0) color : vec4<f32>,
-    @location(1) world_position : vec4<f32>,
-    @location(2) normal : vec3<f32>,
+    @builtin(position) position: vec4f,
+    @location(0) color: vec4<f32>,
+    @location(1) world_position: vec4<f32>,
+    @location(2) normal: vec3<f32>,
 }
 
 // Hard-coded values, should pass these as uniforms
@@ -48,8 +48,7 @@ const shininess = 32.0;
 @fragment
 fn fragment_main(
     fragData: VertexOut,
-) -> @location(0) vec4<f32>
-{
+) -> @location(0) vec4<f32> {
     let normal = fragData.normal;
 
     
@@ -67,7 +66,7 @@ fn fragment_main(
     
     // Combine all components
     let result = (ambient + diffuse + specular) * fragData.color.rgb;
-    
+
     return vec4<f32>(result, fragData.color.a);
 }
 

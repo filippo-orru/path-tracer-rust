@@ -1,7 +1,7 @@
-#import objects_types.wgsl as types;
+import super::objects_types::Vertex;
 
-@export struct Uniforms {
-	top_color: vec3<f32>,
+struct Uniforms {
+    top_color: vec3<f32>,
     bottom_color: vec3<f32>,
     resolution: vec2f,
     camera_direction: vec3f,
@@ -11,7 +11,7 @@
 
 @vertex
 fn vertex_main(
-    vert: types::Vertex,
+    vert: Vertex,
 ) -> VertexOut {
     var vsOutput: VertexOut;
     vsOutput.position = vert.position;
@@ -19,18 +19,17 @@ fn vertex_main(
 }
 
 struct VertexOut {
-	@builtin(position) position: vec4f,
+    @builtin(position) position: vec4f,
 }
 
 struct FragIn {
-	@builtin(position) position: vec4f,
+    @builtin(position) position: vec4f,
 }
 
 @fragment
 fn fragment_main(
     fragData: FragIn,
-) -> @location(0) vec4<f32>
-{
+) -> @location(0) vec4<f32> {
     // Calculate sky color based on uniforms.camera_direction and fragment position
     let uv = fragData.position.xy / uniforms.resolution;
     let normalized_y = uv.y;
@@ -43,7 +42,7 @@ fn fragment_main(
     // This makes the sky change slightly as camera moves
     let camera_factor = dot(normalize(uniforms.camera_direction), vec3<f32>(0.0, 1.0, 0.0)) * 0.2;
     color = mix(color, color * (1.0 + camera_factor), 0.5);
-    
-    return vec4<f32>(color, 1.0);   
+
+    return vec4<f32>(color, 1.0);
 }
 
