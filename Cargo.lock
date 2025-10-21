@@ -2729,6 +2729,7 @@ dependencies = [
  "glam 0.30.8",
  "iced",
  "include-wgsl-oil",
+ "lazy_static",
  "rand",
  "rayon",
  "serde",

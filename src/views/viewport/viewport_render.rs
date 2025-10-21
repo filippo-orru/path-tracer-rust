@@ -9,6 +9,7 @@ use iced::{
         wgpu::{self, ShaderModuleDescriptor},
     },
 };
+use lazy_static::lazy_static;
 
 use crate::{
     render::{SceneData, Triangle, camera_data::CameraData},
@@ -69,6 +70,10 @@ impl Primitive for ViewportPrimitive {
 struct RenderPipelines {
     sky_layer: SkyLayer,
     objects_layer: ObjectsLayer,
+    intermediate_texture: wgpu::Texture,
+
+    intermediate_texture_view: wgpu::TextureView,
+    outline_layer: OutlineLayer,
     viewport: shader::Viewport,
 }
 impl RenderPipelines {
@@ -78,9 +83,37 @@ impl RenderPipelines {
         viewport: &shader::Viewport,
         target_size: &Rectangle,
     ) -> Self {
+        let objects_layer = ObjectsLayer::new(device, format, viewport, target_size);
+        let size = wgpu::Extent3d {
+            width: viewport.physical_width(),
+            height: viewport.physical_height(),
+            depth_or_array_layers: 1,
+        };
+        let intermediate_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("intermediate_texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let intermediate_texture_view =
+            intermediate_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         Self {
             sky_layer: SkyLayer::new(device, format, viewport),
-            objects_layer: ObjectsLayer::new(device, format, viewport, target_size),
+            outline_layer: OutlineLayer::new(
+                device,
+                format,
+                viewport,
+                &objects_layer.depth_texture_view,
+                &intermediate_texture_view,
+            ),
+            objects_layer,
+            intermediate_texture_view,
+            intermediate_texture,
             viewport: viewport.clone(),
         }
     }
@@ -88,6 +121,7 @@ impl RenderPipelines {
     fn update(&mut self, queue: &wgpu::Queue, scene: &SceneData, viewport_state: &ViewportState) {
         self.sky_layer.update(queue, scene);
         self.objects_layer.update(queue, scene, viewport_state);
+        self.outline_layer.update(queue);
     }
 
     fn render(
@@ -96,20 +130,21 @@ impl RenderPipelines {
         encoder: &mut wgpu::CommandEncoder,
         clip_bounds: Rectangle<u32>,
     ) {
-        let mut sky_objects_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("sky_objects_renderpass"),
+        let mut objects_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("objects_renderpass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
+                view: &self.intermediate_texture_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
+            // write depth texture to buffer so we can use it for outlines
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &self.objects_layer.depth_texture_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -120,7 +155,7 @@ impl RenderPipelines {
 
         let viewport = clip_bounds;
         // println!("Viewport: {:?}", viewport);
-        sky_objects_pass.set_viewport(
+        objects_pass.set_viewport(
             viewport.x as f32,
             viewport.y as f32,
             viewport.width as f32,
@@ -133,17 +168,17 @@ impl RenderPipelines {
         //  consider moving the rendering of sky and objects into their own functions
 
         // Draw sky
-        sky_objects_pass.set_pipeline(&self.sky_layer.pipeline.render_pipeline);
-        sky_objects_pass.set_bind_group(0, &self.sky_layer.pipeline.bind_group, &[]);
-        sky_objects_pass.set_vertex_buffer(0, self.sky_layer.vertex_buffer.buffer.slice(..));
-        sky_objects_pass.draw(0..self.sky_layer.vertex_buffer.vertex_count, 0..1);
+        objects_pass.set_pipeline(&self.sky_layer.pipeline.render_pipeline);
+        objects_pass.set_bind_group(0, &self.sky_layer.pipeline.bind_group, &[]);
+        objects_pass.set_vertex_buffer(0, self.sky_layer.vertex_buffer.buffer.slice(..));
+        objects_pass.draw(0..self.sky_layer.vertex_buffer.vertex_count, 0..1);
 
-        // write depth texture to buffer and use it for outlines.
-        sky_objects_pass.set_pipeline(&self.objects_layer.objects.render_pipeline);
-        sky_objects_pass.set_bind_group(0, &self.objects_layer.objects.bind_group, &[]);
-        sky_objects_pass.set_vertex_buffer(0, self.objects_layer.vertex_buffer.buffer.slice(..));
-        sky_objects_pass.draw(0..self.objects_layer.vertex_buffer.vertex_count, 0..1);
-        drop(sky_objects_pass);
+        // Draw objects
+        objects_pass.set_pipeline(&self.objects_layer.pipeline.render_pipeline);
+        objects_pass.set_bind_group(0, &self.objects_layer.pipeline.bind_group, &[]);
+        objects_pass.set_vertex_buffer(0, self.objects_layer.vertex_buffer.buffer.slice(..));
+        objects_pass.draw(0..self.objects_layer.vertex_buffer.vertex_count, 0..1);
+        drop(objects_pass);
 
         // Draw outlines
         let mut outline_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -156,7 +191,7 @@ impl RenderPipelines {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: None, // TODO add stencil buffer for outlines
             timestamp_writes: None,
             occlusion_query_set: None,
         });
@@ -168,10 +203,10 @@ impl RenderPipelines {
             0.0,
             1.0,
         );
-        outline_pass.set_pipeline(&self.objects_layer.outline.render_pipeline);
-        outline_pass.set_bind_group(0, &self.objects_layer.outline.bind_group, &[]);
-        outline_pass.set_vertex_buffer(0, self.objects_layer.vertex_buffer.buffer.slice(..));
-        outline_pass.draw(0..self.objects_layer.vertex_buffer.vertex_count, 0..1);
+        outline_pass.set_pipeline(&self.outline_layer.pipeline.render_pipeline);
+        outline_pass.set_bind_group(0, &self.outline_layer.pipeline.bind_group, &[]);
+        outline_pass.set_vertex_buffer(0, self.outline_layer.vertex_buffer.buffer.slice(..));
+        outline_pass.draw(0..self.outline_layer.vertex_buffer.vertex_count, 0..1);
     }
 }
 
@@ -278,8 +313,7 @@ struct ObjectsLayer {
     depth_texture_view: wgpu::TextureView,
     vertex_buffer: VertexBuffer<Vertex>,
 
-    objects: FragmentShaderPipeline<objects_shader::types::Uniforms>,
-    outline: FragmentShaderPipeline<outline_shader::types::Uniforms>,
+    pipeline: FragmentShaderPipeline<objects_shader::types::Uniforms>,
 
     target_size: Rectangle,
 }
@@ -290,14 +324,15 @@ impl ObjectsLayer {
         viewport: &shader::Viewport,
         target_size: &Rectangle,
     ) -> Self {
-        let layer_label = "objects_layer";
+        let label: &str = "object";
+
         let size = wgpu::Extent3d {
             width: viewport.physical_width(),
             height: viewport.physical_height(),
             depth_or_array_layers: 1,
         };
         let desc = wgpu::TextureDescriptor {
-            label: Some(&format!("{layer_label}_depth_texture")),
+            label: Some(&format!("{label}_depth_texture")),
             size,
             mip_level_count: 1,
             sample_count: 1,
@@ -329,11 +364,8 @@ impl ObjectsLayer {
 
         // TODO
         //  consider making the buffer smaller and drawing meshes in chunks
-        let vertex_buffer = VertexBuffer::new(device, layer_label, 1024 * 40);
-
         Self {
-            objects: {
-                let label: &str = "object";
+            pipeline: {
                 let shader_source: &str = objects_shader::SOURCE;
                 let shader = device.create_shader_module(ShaderModuleDescriptor {
                     label: Some(&format!("{label}_shader")),
@@ -385,91 +417,7 @@ impl ObjectsLayer {
                     entries: &[wgpu::BindGroupEntry {
                         binding: 0,
                         resource: uniform_buffer.buffer.as_entire_binding(),
-                    }]
-                    .into_iter()
-                    .chain(None.unwrap_or(vec![]))
-                    .collect::<Vec<_>>(),
-                });
-
-                FragmentShaderPipeline {
-                    render_pipeline: pipeline,
-                    uniform_buffer,
-                    bind_group,
-                    viewport: viewport.clone(),
-                }
-            },
-            outline: {
-                let label: &str = "outline";
-                let shader_source: &str = outline_shader::SOURCE;
-                let shader = device.create_shader_module(ShaderModuleDescriptor {
-                    label: Some(&format!("{label}_shader")),
-                    source: wgpu::ShaderSource::Wgsl(Cow::from(shader_source)),
-                });
-
-                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(&format!("{label}_fragment_pipeline")),
-                    layout: None,
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: "vertex_main",
-                        buffers: &[wgpu::VertexBufferLayout {
-                            array_stride: vertex_struct_size as wgpu::BufferAddress,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &vertex_attributes_mapped,
-                        }],
-                    },
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        ..Default::default()
-                    },
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: "fragment_main",
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview: None,
-                });
-
-                let uniform_buffer = UniformBuffer::new(device, label);
-
-                let texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-                    label: Some("outline_depth_sampler"),
-                    address_mode_u: wgpu::AddressMode::ClampToEdge,
-                    address_mode_v: wgpu::AddressMode::ClampToEdge,
-                    address_mode_w: wgpu::AddressMode::ClampToEdge,
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
-                    mipmap_filter: wgpu::FilterMode::Nearest,
-                    ..Default::default()
-                });
-
-                let bind_group_layout = pipeline.get_bind_group_layout(0);
-                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&format!("{label}_bind_group_0")),
-                    layout: &bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: uniform_buffer.buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&depth_texture_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&texture_sampler),
-                        },
-                    ]
-                    .into_iter()
-                    .chain(None.unwrap_or(vec![]))
-                    .collect::<Vec<_>>(),
+                    }],
                 });
 
                 FragmentShaderPipeline {
@@ -480,7 +428,7 @@ impl ObjectsLayer {
                 }
             },
             depth_texture_view,
-            vertex_buffer,
+            vertex_buffer: VertexBuffer::new(device, label, 1024 * 40),
             target_size: target_size.clone(),
         }
     }
@@ -491,25 +439,17 @@ impl ObjectsLayer {
         return scene.camera.get_view_projection(aspect_ratio);
     }
 
-    fn get_verts(scene: &SceneData, viewport_state: &ViewportState) -> Vec<Vertex> {
+    fn get_verts(scene: &SceneData, _viewport_state: &ViewportState) -> Vec<Vertex> {
         let grid_tris = Self::get_grid(&scene.camera);
-        let object_tris = scene
-            .objects
-            .iter()
-            .enumerate()
-            .flat_map(|(object_id, object)| {
-                object
-                    .to_triangles()
-                    .into_iter()
-                    .map(move |tri| TriangleWithColor {
-                        tri: tri.transformed(object.position), // TODO apply transformation in vertex shader
-                        color: if viewport_state.selected_object == Some(object_id) {
-                            Vec3::new(1.0, 0.0, 0.0)
-                        } else {
-                            object.material.color
-                        },
-                    })
-            });
+        let object_tris = scene.objects.iter().flat_map(|object| {
+            object
+                .to_triangles()
+                .into_iter()
+                .map(move |tri| TriangleWithColor {
+                    tri: tri.transformed(object.position), // TODO apply transformation in vertex shader
+                    color: object.material.color,
+                })
+        });
 
         let tris = grid_tris
             .into_iter()
@@ -524,15 +464,14 @@ impl ObjectsLayer {
         let view_proj = self.get_view_proj(scene);
         let verts = Self::get_verts(scene, viewport_state);
 
-        self.objects
+        self.pipeline
             .uniform_buffer
             .set_data(queue, objects_shader::types::Uniforms { view_proj });
-        self.outline
-            .uniform_buffer
-            .set_data(queue, outline_shader::types::Uniforms { view_proj });
         self.vertex_buffer.set_data(queue, &verts);
     }
 
+    // TODO
+    //  move grid to its own render pipeline
     fn get_grid(camera: &CameraData) -> Vec<TriangleWithColor> {
         let grid_lines = 5;
         let zoom_level = camera.position.length() / 5.0;
@@ -568,45 +507,190 @@ impl ObjectsLayer {
     }
 }
 
+struct OutlineLayer {
+    pipeline: FragmentShaderPipeline<outline_shader::types::Uniforms>,
+    vertex_buffer: VertexBuffer<Vertex>,
+}
+
+impl OutlineLayer {
+    fn new(
+        device: &shader::wgpu::Device,
+        format: shader::wgpu::TextureFormat,
+        viewport: &shader::Viewport,
+        depth_texture_view: &wgpu::TextureView,
+        intermediate_texture_view: &wgpu::TextureView,
+    ) -> Self {
+        let label: &str = "outline";
+        Self {
+            pipeline: {
+                let shader_source: &str = outline_shader::SOURCE;
+                let shader = device.create_shader_module(ShaderModuleDescriptor {
+                    label: Some(&format!("{label}_shader")),
+                    source: wgpu::ShaderSource::Wgsl(Cow::from(shader_source)),
+                });
+
+                let mut vertex_struct_size = 0;
+                let vertex_attributes_mapped: Vec<wgpu::VertexAttribute> = vec![
+                    wgpu::VertexFormat::Float32x4, // position
+                    wgpu::VertexFormat::Float32x4, // color
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, format)| {
+                    let attr = wgpu::VertexAttribute {
+                        offset: vertex_struct_size,
+                        shader_location: index as u32,
+                        format,
+                    };
+                    vertex_struct_size += format.size();
+                    attr
+                })
+                .collect();
+
+                let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(&format!("{label}_fragment_pipeline")),
+                    layout: None,
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: "vertex_main",
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: vertex_struct_size as wgpu::BufferAddress,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &vertex_attributes_mapped,
+                        }],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: "fragment_main",
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview: None,
+                });
+
+                let uniform_buffer = UniformBuffer::new(device, label);
+
+                let depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("outline_depth_sampler"),
+                    address_mode_u: wgpu::AddressMode::ClampToEdge,
+                    address_mode_v: wgpu::AddressMode::ClampToEdge,
+                    address_mode_w: wgpu::AddressMode::ClampToEdge,
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    mipmap_filter: wgpu::FilterMode::Nearest,
+                    compare: Some(wgpu::CompareFunction::LessEqual),
+                    ..Default::default()
+                });
+                let color_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("outline_color_sampler"),
+                    address_mode_u: wgpu::AddressMode::ClampToEdge,
+                    address_mode_v: wgpu::AddressMode::ClampToEdge,
+                    address_mode_w: wgpu::AddressMode::ClampToEdge,
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    mipmap_filter: wgpu::FilterMode::Nearest,
+                    ..Default::default()
+                });
+
+                let bind_group_layout = pipeline.get_bind_group_layout(0);
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("{label}_bind_group_0")),
+                    layout: &bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniform_buffer.buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&depth_texture_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&depth_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&color_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(
+                                &intermediate_texture_view,
+                            ),
+                        },
+                    ],
+                });
+
+                FragmentShaderPipeline {
+                    render_pipeline: pipeline,
+                    uniform_buffer,
+                    bind_group,
+                    viewport: viewport.clone(),
+                }
+            },
+            vertex_buffer: VertexBuffer::new(device, label, 6), // max 6 vertices for a full-screen quad
+        }
+    }
+
+    fn update(&mut self, queue: &wgpu::Queue) {
+        self.pipeline.uniform_buffer.set_data(
+            queue,
+            outline_shader::types::Uniforms {
+                outline_color: Vec3::new(0.0, 1.0, 0.0),
+            },
+        );
+        self.vertex_buffer.set_data(queue, &FULLSCREEN_QUAD);
+    }
+}
+
+lazy_static! {
+    static ref FULLSCREEN_QUAD: Vec<Vertex> = vec![
+        TriangleWithColor {
+            tri: Triangle {
+                a: Vec3::new(-1.0, -1.0, 1.0),
+                b: Vec3::new(1.0, -1.0, 1.0),
+                c: Vec3::new(1.0, 1.0, 1.0),
+            },
+            color: Vec3::new(1.0, 0.0, 0.0),
+        },
+        TriangleWithColor {
+            tri: Triangle {
+                a: Vec3::new(-1.0, -1.0, 1.0),
+                b: Vec3::new(1.0, 1.0, 1.0),
+                c: Vec3::new(-1.0, 1.0, 1.0),
+            },
+            color: Vec3::new(1.0, 0.0, 0.0),
+        },
+    ]
+    .into_iter()
+    .flat_map(|t| t.to_vertices())
+    .collect();
+}
+
 struct SkyLayer {
     pipeline: FragmentShaderPipeline<sky_shader::types::Uniforms>,
     vertex_buffer: VertexBuffer<Vertex>,
-    // target_size: Rectangle,
-    verts: Vec<Vertex>,
 }
 impl SkyLayer {
     fn new(
         device: &shader::wgpu::Device,
         format: shader::wgpu::TextureFormat,
         viewport: &shader::Viewport,
-        // target_size: &Rectangle,
     ) -> Self {
         let label: &str = "sky";
         let vertex_buffer = VertexBuffer::new(
             device, label, 6, // max 6 vertices for a full-screen quad
         );
-
-        let verts = vec![
-            TriangleWithColor {
-                tri: Triangle {
-                    a: Vec3::new(-1.0, -1.0, 0.0),
-                    b: Vec3::new(1.0, -1.0, 0.0),
-                    c: Vec3::new(1.0, 1.0, 0.0),
-                },
-                color: Vec3::new(1.0, 0.0, 0.0),
-            },
-            TriangleWithColor {
-                tri: Triangle {
-                    a: Vec3::new(-1.0, -1.0, 0.0),
-                    b: Vec3::new(1.0, 1.0, 0.0),
-                    c: Vec3::new(-1.0, 1.0, 0.0),
-                },
-                color: Vec3::new(1.0, 0.0, 0.0),
-            },
-        ]
-        .into_iter()
-        .flat_map(|t| t.to_vertices())
-        .collect();
 
         Self {
             pipeline: {
@@ -652,8 +736,8 @@ impl SkyLayer {
                     },
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: wgpu::TextureFormat::Depth32Float,
-                        depth_write_enabled: true,
-                        depth_compare: wgpu::CompareFunction::Less,
+                        depth_write_enabled: false,
+                        depth_compare: wgpu::CompareFunction::Always,
                         stencil: wgpu::StencilState::default(),
                         bias: wgpu::DepthBiasState::default(),
                     }),
@@ -679,10 +763,7 @@ impl SkyLayer {
                     entries: &[wgpu::BindGroupEntry {
                         binding: 0,
                         resource: uniform_buffer.buffer.as_entire_binding(),
-                    }]
-                    .into_iter()
-                    .chain(None.unwrap_or(vec![]))
-                    .collect::<Vec<_>>(),
+                    }],
                 });
 
                 FragmentShaderPipeline {
@@ -693,8 +774,6 @@ impl SkyLayer {
                 }
             },
             vertex_buffer,
-            // target_size: target_size.clone(),
-            verts,
         }
     }
 
@@ -711,7 +790,7 @@ impl SkyLayer {
                 camera_direction: scene.camera.direction(),
             },
         );
-        self.vertex_buffer.set_data(queue, &self.verts);
+        self.vertex_buffer.set_data(queue, &FULLSCREEN_QUAD);
     }
 }
 
